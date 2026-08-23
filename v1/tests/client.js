@@ -22,16 +22,18 @@ const boot = [
 ].join("\n");
 const expose = [
   "    globalThis.__clientTest = {",
-  "      App, NostrService, actorLabel, attributionLabel,",
-  "      buildDeletionIndex, eventIsDeleted,",
+  "      App, NostrService, activeReplaceableEvents, actorLabel,",
+  "      attributionHtml, attributionLabel, buildDeletionIndex, eventIsDeleted,",
   "      cloneUrlSetFromText, hasRepositoryOwnerTag,",
+  "      githubNip39Claims, gistVerifiesNip39,",
   "      isNostrEventShape, isRepositoryStarReaction,",
   "      isValidNip34CollaborationEvent, repositoryStarIdentity,",
   "      repositoryUnstarTags,",
-  "      latestAddressableEvents, normalizeRelayUrls,",
+  "      latestAddressableEvents, latestReplaceableEvents, normalizeRelayUrls,",
+  "      nip65WriteRelays,",
   "      repositoryEarliestUniqueCommit, repositoryStateMap, scalarTagValues,",
   "      uniqueNip22EventReference, uniqueTagValue,",
-  "      nostrService, verificationService",
+  "      externalIdentityService, nostrService, verificationService",
   "    };"
 ].join("\n");
 assert.ok(scripts[0][2].includes(boot), "client boot block changed");
@@ -94,16 +96,23 @@ new vm.Script(source, { filename: "client/index.html:inline" })
 const {
   App,
   NostrService,
+  activeReplaceableEvents,
   actorLabel,
+  attributionHtml,
   attributionLabel,
   buildDeletionIndex,
   cloneUrlSetFromText,
   eventIsDeleted,
+  externalIdentityService,
+  githubNip39Claims,
+  gistVerifiesNip39,
   hasRepositoryOwnerTag,
   isNostrEventShape,
   isRepositoryStarReaction,
   isValidNip34CollaborationEvent,
   latestAddressableEvents,
+  latestReplaceableEvents,
+  nip65WriteRelays,
   normalizeRelayUrls,
   repositoryEarliestUniqueCommit,
   repositoryStateMap,
@@ -494,6 +503,155 @@ ok(
   "addressable same-time tie selects lowest event id"
 );
 
+const nip39Older = {
+  id: "4".repeat(64),
+  pubkey: rootAuthor,
+  kind: 10011,
+  created_at: 100,
+  tags: [["i", "github:old-name", "abcde"]],
+  content: ""
+};
+const nip39TieHigh = {
+  ...nip39Older,
+  id: "f".repeat(64),
+  created_at: 200,
+  tags: [["i", "github:high-name", "bcdef"]]
+};
+const nip39TieLow = {
+  ...nip39TieHigh,
+  id: "3".repeat(64),
+  tags: [["i", "github:low-name", "cdef0"]]
+};
+const nip39OtherAuthor = {
+  ...nip39TieHigh,
+  id: "2".repeat(64),
+  pubkey: attacker,
+  created_at: 150
+};
+const nip39Heads = latestReplaceableEvents([
+  nip39TieHigh,
+  nip39OtherAuthor,
+  nip39Older,
+  nip39TieLow
+], 10011);
+ok(
+  nip39Heads.length === 2
+  && nip39Heads.find(event => event.pubkey === rootAuthor)?.id === nip39TieLow.id
+  && nip39Heads.find(event => event.pubkey === attacker)?.id === nip39OtherAuthor.id,
+  "regular replaceable identities reduce per author with the NIP-01 tie-break"
+);
+const nip39Deletion = {
+  id: "5".repeat(64),
+  pubkey: rootAuthor,
+  kind: 5,
+  created_at: 201,
+  tags: [["e", nip39TieLow.id]],
+  content: ""
+};
+ok(
+  activeReplaceableEvents(
+    [nip39Older, nip39TieHigh, nip39TieLow],
+    10011,
+    buildDeletionIndex([nip39Deletion])
+  ).length === 0,
+  "deleting the current identity snapshot does not resurrect an older version"
+);
+
+const nip39Claims = githubNip39Claims({
+  ...nip39TieLow,
+  tags: [
+    ["i", "github:Zulu", "ABCDEF"],
+    ["i", "github:alice", "12345"],
+    ["i", "github:ALICE", "12345"],
+    ["i", "GitHub:wrong-prefix", "abcde"],
+    ["i", "github:-invalid", "abcde"],
+    ["i", "github:valid", "not-a-gist-id"]
+  ]
+});
+ok(
+  JSON.stringify(nip39Claims) === JSON.stringify([
+    { login: "alice", proof: "12345" },
+    { login: "zulu", proof: "abcdef" }
+  ]),
+  "NIP-39 GitHub claims are a validated, deduplicated, canonical set"
+);
+
+ok(
+  JSON.stringify(nip65WriteRelays({
+    ...nip39TieLow,
+    kind: 10002,
+    tags: [
+      ["r", "wss://write.example", "write"],
+      ["r", "wss://both.example"],
+      ["r", "wss://read.example", "read"],
+      ["r", "wss://write.example", "write"],
+      ["r", "ws://insecure.example", "write"]
+    ]
+  })) === JSON.stringify([
+    "wss://both.example",
+    "wss://write.example"
+  ]),
+  "NIP-65 identity discovery uses the canonical write-relay set"
+);
+
+const claimedNpub = "npub1example";
+const exactProof = `Verifying that I control the following Nostr public key: ${claimedNpub}`;
+const validGist = {
+  owner: { login: "Alice" },
+  files: {
+    "nostr.txt": {
+      content: exactProof,
+      truncated: false
+    }
+  }
+};
+ok(
+  gistVerifiesNip39(validGist, "alice", claimedNpub)
+  && !gistVerifiesNip39({
+    ...validGist,
+    owner: { login: "mallory" }
+  }, "alice", claimedNpub)
+  && !gistVerifiesNip39({
+    ...validGist,
+    files: {
+      ...validGist.files,
+      "extra.txt": { content: exactProof, truncated: false }
+    }
+  }, "alice", claimedNpub)
+  && !gistVerifiesNip39({
+    ...validGist,
+    files: {
+      "nostr.txt": { content: `${exactProof}\n`, truncated: false }
+    }
+  }, "alice", claimedNpub),
+  "NIP-39 verification requires the claimed GitHub owner and one exact proof file"
+);
+
+externalIdentityService.githubByPubkey.set(rootAuthor, [{
+  login: "alice",
+  proof: "12345"
+}]);
+externalIdentityService.githubByPubkey.set(bridgeIssue.pubkey, [{
+  login: "not-the-bridge-actor",
+  proof: "67890"
+}]);
+const enrichedAttribution = attributionHtml({
+  ...directUserComment,
+  pubkey: rootAuthor
+});
+ok(
+  enrichedAttribution.includes("✓ GitHub @alice")
+  && enrichedAttribution.includes('href="https://github.com/alice"')
+  && attributionLabel({
+    ...directUserComment,
+    pubkey: rootAuthor
+  }).includes("GitHub @alice (verified via NIP-39)")
+  && !attributionHtml(bridgeIssue).includes("not-the-bridge-actor"),
+  "verified GitHub identity enriches user bylines but never relabels bridge signatures"
+);
+externalIdentityService.githubByPubkey.delete(rootAuthor);
+externalIdentityService.githubByPubkey.delete(bridgeIssue.pubkey);
+
 const ambiguousAddressA = {
   ...root,
   tags: [
@@ -670,6 +828,55 @@ ok(
 );
 
 (async () => {
+  const proofAuthors = Array.from(
+    {length: 33},
+    (_, index) => (index + 1).toString(16).padStart(64, "0")
+  );
+  const proofHeads = proofAuthors.map((pubkey, index) => ({
+    id: (index + 101).toString(16).padStart(64, "0"),
+    pubkey,
+    kind: 10011,
+    created_at: 500,
+    tags: [[
+      "i",
+      `github:user${index + 1}`,
+      (index + 10000).toString(16).padStart(5, "0")
+    ]],
+    content: ""
+  }));
+  const originalProofCheck = externalIdentityService.verifyGithubClaim;
+  let proofChecks = 0;
+  externalIdentityService.verifyGithubClaim = async (_pubkey, claim) => {
+    proofChecks += 1;
+    return {status: "valid", identity: claim};
+  };
+  await externalIdentityService.reconcile(proofAuthors, proofHeads);
+  const budgetApplied = proofChecks === 32
+    && externalIdentityService.githubIdentities(proofAuthors[31]).length === 1
+    && externalIdentityService.githubIdentities(proofAuthors[32]).length === 0;
+  externalIdentityService.githubByPubkey.set(proofAuthors[32], [{
+    login: "stale",
+    proof: "abcde"
+  }]);
+  externalIdentityService.checkedHeads.set(proofAuthors[32], {
+    eventId: "f".repeat(64),
+    checkedAt: Date.now()
+  });
+  for (const pubkey of proofAuthors.slice(0, 32)) {
+    const checked = externalIdentityService.checkedHeads.get(pubkey);
+    checked.checkedAt = 0;
+  }
+  await externalIdentityService.reconcile(proofAuthors, proofHeads);
+  ok(
+    budgetApplied
+    && proofChecks === 64
+    && externalIdentityService.githubIdentities(proofAuthors[32]).length === 0,
+    "aggregate Gist budget is bounded and never retains a superseded badge"
+  );
+  externalIdentityService.verifyGithubClaim = originalProofCheck;
+  externalIdentityService.githubByPubkey.clear();
+  externalIdentityService.checkedHeads.clear();
+
   const originalDomainLookup = verificationService.getDomainPubkeys.bind(
     verificationService
   );

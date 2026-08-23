@@ -77,6 +77,12 @@ Relay event pool                   Map event-ID -> verified immutable event.
 Addressable event versions         Set reduced per (kind,pubkey,d) coordinate
                                    by greatest created_at, then lowest event ID.
 
+NIP-39 identity snapshots          Complete regular-replaceable i-tag set per
+                                   author. Select greatest created_at, then
+                                   lowest event ID, before deletion; versions
+                                   are never unioned and deletion of the head
+                                   never resurrects an older snapshot.
+
 NIP-22 comments                    Directed parent graph keyed by event ID.
                                    E/K/P define the root and e/k/p the parent.
                                    Reference edges establish causality;
@@ -187,6 +193,26 @@ for an already-linked pubkey may restore a browser session, but preserves the
 stored bunker and client key. Those credentials change only through the
 explicit "Replace remote signer connection" action, and the replacement signer
 must prove the exact existing pubkey.
+
+After both identities are linked, the account page offers a separate optional
+NIP-39 GitHub profile assertion. It is presentation metadata, not bridge
+authority and not part of link completion. The user creates the one-file Gist
+manually, so the GitHub App needs no Gists permission. A durable job verifies
+the Gist owner and exact npub proof, reduces the current kind-10011 snapshot
+and its deletions, preserves the complete existing tag/content set, and shows
+the proposed set before any signature. Explicit confirmation is bound to the
+observed head ID. The worker refetches immediately before signing; a different
+head returns to review rather than overwriting unseen state.
+
+The kind-10011 timestamp is monotonically greater than the observed head. Once
+the linked NIP-46 signer returns the exact requested event, the complete signed
+wire event is persisted before relay I/O. Stable per-event/per-relay jobs then
+publish it independently, so a process crash or relay retry never requests
+another signature. Kind-10002 NIP-65 write relays and bounded collaboration
+relays are sets of publication/discovery alternatives; signer-transport relays
+are never mistaken for user event relays. Removing the proof is another
+reviewed complete replacement without the managed GitHub claim; it does not
+unlink the bridge or delete the Gist.
 
 One GitHub limitation is intrinsic to repository stars: installation tokens
 are not user identities and GitHub's star/unstar endpoints accept GitHub App
@@ -524,7 +550,8 @@ Important roles:
       exact verified (publisher pubkey, 30617 d identifier) address
 
   jobs
-      durable raw deliveries, crossings, dependency work, and backfills
+      durable raw deliveries, crossings, dependency work, backfills, optional
+      NIP-39 review/sign state, and per-relay publication retries
 
   event_map
       completed bidirectional crossings and immutable parent/root metadata
@@ -558,6 +585,12 @@ Important roles:
   - ordinary repeated NIP-46 proof preserves existing signer credentials;
     only an explicit cookie-bound replacement request may rotate them, and
     only after the new signer proves the exact existing pubkey;
+  - optional NIP-39 status and mutations require the exact live, fully linked
+    cookie-bound GitHub/Nostr pair; GET is read-only, Gist URLs are fixed to
+    gist.github.com and the linked login, and no Gists permission is granted;
+  - NIP-39 confirmation names the exact reduced head reviewed by the user; a
+    concurrent replacement forces review again, and the signed event is
+    durably recorded before independent relay publication;
   - plain Nostr-link page GET is read-only; an explicit start POST allocates
     the browser session and per-link keypair, while approval listener/intake
     mutations are POST-only;
@@ -611,8 +644,10 @@ availability dependency, but no asset is downloaded or executed by the server.
   NIP-09  same-author deletion requests and permanent deletion semantics
   NIP-22  kind 1111 uppercase root and lowercase parent references
   NIP-34  repositories, issues, patches, PRs, updates, and four statuses
+  NIP-39  external identity assertions and GitHub Gist proof
   NIP-44  encryption for NIP-46 kind 24133 messages
   NIP-46  durable remote signing via nostrconnect
+  NIP-65  user read/write relay discovery
   BIP-340 Schnorr signatures
 
 ================================================================================

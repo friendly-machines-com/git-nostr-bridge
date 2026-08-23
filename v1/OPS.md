@@ -41,6 +41,13 @@ NIP-46 proof for an existing pubkey likewise restores only the browser session;
 rotating the stored bunker/client credentials requires the separately labelled
 "Replace remote signer connection" action.
 
+The optional NIP-39 identity card follows the same responsiveness split.
+`GET /v1/nip39.php` is read-only and fast. Start and confirmation POSTs only
+record durable user intent. A separate unawaited browser worker POST may spend
+time verifying GitHub, reading relays, or requesting one signer response while
+the page continues polling GET every two seconds; cron is the backstop if the
+page closes. NIP-39 completion never changes `fully_linked`.
+
 Keep the server clock synchronized. Nostr future-event bounds, OAuth expiry,
 queue leases, and Nostr-to-GitHub crash reconciliation all compare timestamps;
 in particular, a GitHub object created before a job's durable enqueue is
@@ -119,6 +126,8 @@ php tests/github-status.php
 php tests/schema.php
 php tests/nostr-link-page.php
 php tests/status-recovery.php
+php tests/nip39.php
+php tests/nip39-page.php
 node tests/index-ui.js
 node tests/client.js
 ```
@@ -127,15 +136,17 @@ Expected results:
 
 ```text
 68 passed, 0 failed
-104 passed, 0 failed
+106 passed, 0 failed
 52 passed, 0 failed
 20 passed, 0 failed
 3 passed, 0 failed
 12 passed, 0 failed
 21 passed, 0 failed
 10 passed, 0 failed
-index.html Nostr sign-in UX OK
-29 passed, 0 failed
+14 passed, 0 failed
+7 passed, 0 failed
+index.html account and NIP-39 UX OK
+41 passed, 0 failed
 ```
 
 Lint every PHP source as well:
@@ -326,6 +337,12 @@ Database, WAL/SHM, lock, and log files are mode 0600.
   a validated signer authorization URL when required, and keeps polling the
   cookie-bound state until completion.
 - `nip46_finish` owns all work after approval; the browser may close.
+- `nip39_identity` owns optional proof verification, complete-set reduction,
+  explicit-head confirmation, and the one kind-10011 signer request. A job in
+  `awaiting_confirmation` has performed no signing or publication.
+- `nip39_publish_relay` owns one already-signed event/relay pair. The parent
+  stores the signed event before enqueueing these children; stable dedupe keys
+  make crash recovery safe without asking the signer again.
 - An ordinary `nip46_finish` for an already-linked pubkey restores the
   cookie-bound browser session without changing the stored signer. Its job
   carries `replace_pubkey` only when the already-identified browser explicitly

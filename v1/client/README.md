@@ -4,8 +4,9 @@ This behavior follows
 [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md),
 [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md),
 [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md), and
-[NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md), and
-[NIP-39](https://github.com/nostr-protocol/nips/blob/master/39.md).
+[NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md),
+[NIP-39](https://github.com/nostr-protocol/nips/blob/master/39.md), and
+[NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md).
 
 The client assumes no causal ordering from relays, timestamps, relay
 responses, or event arrival. An issue, one of its comments, and that
@@ -156,9 +157,17 @@ is the exact NIP-39 proof for that author's npub. Relay and GitHub verification
 run after repository activity is rendered; failure leaves the ordinary Nostr
 byline unchanged. This assertion is optional presentation metadata. It never
 authorizes a bridge crossing, selects a GitHub token, or creates an account
-link. To bound background work deterministically, one refresh considers the
-lexically first 256 visible author keys and at most eight canonical GitHub
-claims from each author's current snapshot.
+link. Before querying kind `10011`, the client independently reduces each
+visible author's kind `10002` NIP-65 relay-list snapshot and its exact
+deletions, then adds write-capable personal relays to the collaboration-relay
+fallback. NIP-46 signer transport relays are unrelated and are never used for
+this inference. To bound background work deterministically, one refresh
+considers the lexically first 256 visible author keys, at most eight canonical
+GitHub claims from each current snapshot, at most four write relays per
+author, eight collaboration relays, and twelve identity relays overall. At
+most 32 GitHub proofs are checked in one refresh, and an unchanged successfully
+checked snapshot is revalidated after one hour. A new replacement or deletion
+bypasses that age cache immediately.
 
 After a relay acknowledgement, the already verified signed event is merged
 into the same cache immediately. Repository announcements are attempted on

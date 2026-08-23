@@ -76,6 +76,48 @@ function jobs_claim_due(int $n = 25): array
     return $claimed;
 }
 
+/**
+ * Claim one known due job by immutable ID.
+ *
+ * Browser-assisted workflows use this to reduce first-action latency while
+ * the ordinary cron worker remains the backstop. The same conditional lease
+ * as jobs_claim_due prevents the web request and cron from executing it
+ * concurrently.
+ */
+function jobs_claim_id(int $id): ?array
+{
+    if ($id < 1) return null;
+    $query = db()->prepare(
+        "SELECT * FROM jobs
+         WHERE id=? AND status='pending' AND run_at<=?"
+    );
+    $query->execute([$id, now()]);
+    $job = $query->fetch();
+    if (!is_array($job)) return null;
+    $claim = db()->prepare(
+        "UPDATE jobs
+         SET attempts=attempts+1,run_at=?,updated_at=?
+         WHERE id=? AND status='pending' AND run_at<=?"
+    );
+    $claim->execute([now() + JOBS_LEASE_SECS, now(), $id, now()]);
+    if ($claim->rowCount() !== 1) return null;
+    $job['attempts'] = (int)$job['attempts'] + 1;
+    $job['payload_arr'] = json_decode($job['payload'], true) ?: [];
+    return $job;
+}
+
+function jobs_update_payload(int $id, array $payload): void
+{
+    $update = db()->prepare(
+        "UPDATE jobs SET payload=?,updated_at=?
+         WHERE id=? AND status='pending'"
+    );
+    $update->execute([json_c($payload), now(), $id]);
+    if ($update->rowCount() !== 1) {
+        throw new RuntimeException('durable job is no longer pending');
+    }
+}
+
 function jobs_finish(int $id, bool $ok, string $error = ''): void
 {
     $db = db();

@@ -17,6 +17,7 @@ require_once __DIR__ . '/repository.php';
 require_once __DIR__ . '/secrets.php';
 require_once __DIR__ . '/github_app.php';
 require_once __DIR__ . '/linking.php';
+require_once __DIR__ . '/nip39.php';
 
 class BridgeSkip extends RuntimeException {}    // permanent skip, no retry
 class BridgeRemoteSignerUnavailable extends RuntimeException {}
@@ -1536,35 +1537,49 @@ function bridge_run_due_jobs(int $limit = 25): void
     for ($i = 0; $i < $limit; $i++) {
         $claimed = jobs_claim_due(1);
         if (!$claimed) break;
-        $job = $claimed[0];
-        try {
-            $err = bridge_execute_job($job);
-            jobs_finish((int)$job['id'], $err === null, $err ?? '');
-        } catch (BridgeDefer $e) {
-            jobs_defer((int)$job['id'], $e->delaySecs, $e->getMessage());
-        } catch (BridgeSkip $e) {
-            bridge_log('jobs', 'permanent skip', [
-                'id' => (int)$job['id'], 'reason' => $e->getMessage(),
-            ]);
-            jobs_finish((int)$job['id'], true);
-        } catch (GhError $e) {
-            $code = $e->getCode();
-            if ($code === 0
-                || in_array($code, [401, 403, 404, 408, 409, 425, 429], true)
-                || $code >= 500) {
-                $attempt = min(6, max(0, (int)$job['attempts'] - 1));
-                jobs_defer(
-                    (int)$job['id'],
-                    min(3600, 60 * (2 ** $attempt)),
-                    $e->getMessage()
-                );
-            } else {
-                jobs_finish((int)$job['id'], false, $e->getMessage());
-            }
-        } catch (Throwable $e) {
+        bridge_process_claimed_job($claimed[0]);
+    }
+}
+
+/** Apply the common durable retry policy to one already leased job. */
+function bridge_process_claimed_job(array $job): void
+{
+    try {
+        $err = bridge_execute_job($job);
+        jobs_finish((int)$job['id'], $err === null, $err ?? '');
+    } catch (BridgeDefer $e) {
+        jobs_defer((int)$job['id'], $e->delaySecs, $e->getMessage());
+    } catch (BridgeSkip $e) {
+        bridge_log('jobs', 'permanent skip', [
+            'id' => (int)$job['id'], 'reason' => $e->getMessage(),
+        ]);
+        jobs_finish((int)$job['id'], true);
+    } catch (GhError $e) {
+        $code = $e->getCode();
+        if ($code === 0
+            || in_array($code, [401, 403, 404, 408, 409, 425, 429], true)
+            || $code >= 500) {
+            $attempt = min(6, max(0, (int)$job['attempts'] - 1));
+            jobs_defer(
+                (int)$job['id'],
+                min(3600, 60 * (2 ** $attempt)),
+                $e->getMessage()
+            );
+        } else {
             jobs_finish((int)$job['id'], false, $e->getMessage());
         }
+    } catch (Throwable $e) {
+        jobs_finish((int)$job['id'], false, $e->getMessage());
     }
+}
+
+/** Browser latency helper; cron remains the authoritative retry backstop. */
+function bridge_run_job_id(int $id): bool
+{
+    $job = jobs_claim_id($id);
+    if ($job === null) return false;
+    bridge_process_claimed_job($job);
+    return true;
 }
 
 /** Reflect completion-job failure/corruption back into connected UI state. */
@@ -1944,6 +1959,387 @@ function bridge_ingest_github_delivery(array $p): ?string
     return null;
 }
 
+function bridge_nip39_link_is_active(string $login, string $pubkey): bool
+{
+    $query = db()->prepare(
+        "SELECT 1
+         FROM links l
+         JOIN github_accounts ga ON ga.login=l.login
+         JOIN nostr_accounts na ON na.pubkey=l.pubkey
+         WHERE l.login=? AND l.pubkey=?
+           AND ga.provider='github_app' AND ga.auth_status='active'
+           AND na.status='linked'"
+    );
+    $query->execute([$login, strtolower($pubkey)]);
+    return (bool)$query->fetchColumn();
+}
+
+function bridge_nip39_save_payload(
+    array &$job,
+    array $payload,
+    string $phase
+): void {
+    $payload['phase'] = $phase;
+    jobs_update_payload((int)$job['id'], $payload);
+    $job['payload_arr'] = $payload;
+}
+
+function bridge_nip39_fail(
+    array &$job,
+    array $payload,
+    string $message
+): ?string {
+    $payload['error'] = substr($message, 0, 300);
+    unset($payload['auth_url']);
+    bridge_nip39_save_payload($job, $payload, 'failed');
+    return null;
+}
+
+if (!function_exists('bridge_nip39_sign_event')) {
+function bridge_nip39_sign_event(
+    array $author,
+    array $proposal,
+    ?callable $onAuthUrl = null,
+    ?callable $onSignerError = null
+): ?array {
+    return nip46_sign_event(
+        (string)$author['client_priv'],
+        fm_pubkey_hex((string)$author['client_priv']),
+        (string)$author['bunker'],
+        $proposal,
+        8.0,
+        $onAuthUrl,
+        $onSignerError
+    );
+}
+}
+
+/** Build and persist a proposal preview from the latest observed head. */
+function bridge_nip39_prepare(
+    array &$job,
+    array $payload,
+    bool $reconfirmation
+): ?string {
+    $login = (string)($payload['github_login'] ?? '');
+    $pubkey = strtolower((string)($payload['pubkey'] ?? ''));
+    $action = (string)($payload['action'] ?? '');
+    $gistId = $payload['gist_id'] ?? null;
+    if (!nip39_github_login_valid($login)
+        || !is_hex64($pubkey)
+        || !in_array($action, ['add', 'remove'], true)
+        || ($action === 'add'
+            && (!is_string($gistId)
+                || !preg_match('/^[0-9a-f]{5,64}$/D', $gistId)))
+        || ($action === 'remove' && $gistId !== null)) {
+        return bridge_nip39_fail(
+            $job,
+            $payload,
+            'The identity-publication request is malformed.'
+        );
+    }
+    if (!bridge_nip39_link_is_active($login, $pubkey)) {
+        return bridge_nip39_fail(
+            $job,
+            $payload,
+            'The GitHub and Nostr identities are no longer fully linked.'
+        );
+    }
+    if ($action === 'add') {
+        try {
+            nip39_verify_github_gist($login, $pubkey, $gistId);
+            $payload['gist_verified_at'] = now();
+        } catch (Nip39ProofError $error) {
+            return bridge_nip39_fail($job, $payload, $error->getMessage());
+        }
+    }
+
+    bridge_nip39_save_payload(
+        $job,
+        $payload,
+        $reconfirmation ? 'checking_current' : 'reading_current'
+    );
+    try {
+        $context = nip39_discover_context($pubkey);
+    } catch (Nip39RelayUnavailable $error) {
+        throw new BridgeDefer($error->getMessage(), 30);
+    }
+    $current = $context['current'];
+    $proposal = nip39_build_proposal(
+        $current,
+        $pubkey,
+        $login,
+        $action === 'add' ? $gistId : null
+    );
+    $payload['base_event_id'] = is_array($current)
+        ? strtolower((string)$current['id']) : null;
+    $payload['proposed_event'] = $proposal;
+    $payload['identities'] = nip39_identity_preview($proposal['tags']);
+    $payload['target_relays'] = $context['relays'];
+    $payload['observed_relays'] = $context['complete_relays'];
+    $payload['error'] = null;
+    unset($payload['auth_url'], $payload['confirmed_base_event_id']);
+
+    if (!nip39_managed_claim_changed(
+        $current,
+        $login,
+        $action === 'add' ? $gistId : null
+    )) {
+        bridge_nip39_save_payload(
+            $job,
+            $payload,
+            $action === 'add' ? 'already_current' : 'nothing_to_remove'
+        );
+        return null;
+    }
+
+    if ($reconfirmation) {
+        $payload['notice'] =
+            'The current Nostr identity snapshot changed before signing. '
+            . 'Review the refreshed complete set.';
+    } else {
+        unset($payload['notice']);
+    }
+    bridge_nip39_save_payload(
+        $job,
+        $payload,
+        'awaiting_confirmation'
+    );
+    throw new BridgeDefer(
+        'waiting for explicit NIP-39 publication confirmation',
+        86400
+    );
+}
+
+function bridge_nip39_execute_identity(array &$job): ?string
+{
+    $payload = is_array($job['payload_arr'] ?? null)
+        ? $job['payload_arr'] : [];
+    $phase = (string)($payload['phase'] ?? 'preparing');
+    if (in_array($phase, ['preparing', 'reading_current'], true)) {
+        return bridge_nip39_prepare($job, $payload, false);
+    }
+    if ($phase === 'awaiting_confirmation') {
+        throw new BridgeDefer(
+            'waiting for explicit NIP-39 publication confirmation',
+            86400
+        );
+    }
+    if (in_array($phase, [
+        'ready_to_sign',
+        'checking_current',
+        'awaiting_signature',
+    ], true)) {
+        $login = (string)($payload['github_login'] ?? '');
+        $pubkey = strtolower((string)($payload['pubkey'] ?? ''));
+        $action = (string)($payload['action'] ?? '');
+        $gistId = $payload['gist_id'] ?? null;
+        if (!bridge_nip39_link_is_active($login, $pubkey)) {
+            return bridge_nip39_fail(
+                $job,
+                $payload,
+                'The GitHub and Nostr identities are no longer fully linked.'
+            );
+        }
+        if ($action === 'add'
+            && (int)($payload['gist_verified_at'] ?? 0) < now() - 60) {
+            try {
+                nip39_verify_github_gist(
+                    $login,
+                    $pubkey,
+                    (string)$gistId
+                );
+                $payload['gist_verified_at'] = now();
+            } catch (Nip39ProofError $error) {
+                return bridge_nip39_fail(
+                    $job,
+                    $payload,
+                    $error->getMessage()
+                );
+            }
+        }
+
+        bridge_nip39_save_payload(
+            $job,
+            $payload,
+            'checking_current'
+        );
+        try {
+            $context = nip39_discover_context($pubkey);
+        } catch (Nip39RelayUnavailable $error) {
+            throw new BridgeDefer($error->getMessage(), 30);
+        }
+        $currentId = is_array($context['current'])
+            ? strtolower((string)$context['current']['id']) : null;
+        $confirmedBase = $payload['confirmed_base_event_id'] ?? null;
+        if ($confirmedBase !== $currentId) {
+            return bridge_nip39_prepare($job, $payload, true);
+        }
+        $proposal = nip39_build_proposal(
+            $context['current'],
+            $pubkey,
+            $login,
+            $action === 'add' ? (string)$gistId : null
+        );
+        $payload['proposed_event'] = $proposal;
+        $payload['target_relays'] = $context['relays'];
+        $payload['observed_relays'] = $context['complete_relays'];
+        $payload['error'] = null;
+        bridge_nip39_save_payload(
+            $job,
+            $payload,
+            'awaiting_signature'
+        );
+
+        $author = bridge_resolve_nostr_author($pubkey);
+        if ($author === null || ($author['path'] ?? '') !== 'remote') {
+            return bridge_nip39_fail(
+                $job,
+                $payload,
+                'The linked remote Nostr signer is unavailable.'
+            );
+        }
+        $authUrl = null;
+        $signerError = null;
+        $onAuthUrl = static function (string $url) use (
+            &$authUrl,
+            &$job,
+            &$payload
+        ): void {
+            $authUrl = $url;
+            $payload['auth_url'] = $url;
+            bridge_nip39_save_payload(
+                $job,
+                $payload,
+                'awaiting_signature'
+            );
+        };
+        $onSignerError = static function (string $message) use (
+            &$signerError
+        ): void {
+            $signerError = $message;
+        };
+        try {
+            $signed = bridge_nip39_sign_event(
+                $author,
+                $proposal,
+                $onAuthUrl,
+                $onSignerError
+            );
+        } catch (WsException $error) {
+            throw new BridgeDefer(
+                'waiting for the linked Nostr signer',
+                15
+            );
+        }
+        if ($signed === null) {
+            if ($signerError !== null) {
+                return bridge_nip39_fail(
+                    $job,
+                    $payload,
+                    'The signer rejected the identity update: '
+                    . $signerError
+                    . '. In Amber, allow optional kind 10011 for the '
+                    . 'friendly-machines bridge connection, then try again.'
+                );
+            }
+            throw new BridgeDefer(
+                $authUrl !== null
+                    ? 'waiting for signer authorization'
+                    : 'waiting for the linked Nostr signer',
+                15
+            );
+        }
+        if (!nip46_signed_event_matches(
+            $signed,
+            nip46_unsigned_event($proposal),
+            $pubkey
+        )) {
+            return bridge_nip39_fail(
+                $job,
+                $payload,
+                'The signer returned a mismatched identity event.'
+            );
+        }
+
+        /*
+         * Persist the complete signed event before any relay I/O. Every retry
+         * below uses this exact signature and can never ask Amber to sign the
+         * same confirmed intent again.
+         */
+        $payload['signed_event'] = nip46_wire_event($signed);
+        unset($payload['auth_url']);
+        bridge_nip39_save_payload($job, $payload, 'signed');
+        return bridge_nip39_enqueue_publications($job, $payload);
+    }
+    if ($phase === 'signed') {
+        return bridge_nip39_enqueue_publications($job, $payload);
+    }
+    if (in_array($phase, [
+        'failed',
+        'already_current',
+        'nothing_to_remove',
+        'publishing',
+    ], true)) {
+        return null;
+    }
+    return bridge_nip39_fail(
+        $job,
+        $payload,
+        'The identity-publication job has an invalid phase.'
+    );
+}
+
+/**
+ * Enqueue every per-relay publication from an already durable signed event.
+ * Re-entering this phase after a crash is safe because every child has a
+ * stable dedupe key.
+ */
+function bridge_nip39_enqueue_publications(
+    array &$job,
+    array $payload
+): ?string {
+    $signed = $payload['signed_event'] ?? null;
+    $pubkey = strtolower((string)($payload['pubkey'] ?? ''));
+    if (!is_array($signed)
+        || !fm_event_verify($signed)
+        || (int)($signed['kind'] ?? -1) !== NIP39_KIND
+        || strtolower((string)($signed['pubkey'] ?? '')) !== $pubkey) {
+        return bridge_nip39_fail(
+            $job,
+            $payload,
+            'The durable signed identity event is invalid.'
+        );
+    }
+    $publicationJobs = [];
+    foreach (relay_url_set($payload['target_relays'] ?? [], 12) as $relay) {
+        $dedupe = 'nip39relay:' . $signed['id'] . ':'
+            . substr(hash('sha256', $relay), 0, 16);
+        if (!jobs_dedupe_terminal($dedupe)) {
+            jobs_enqueue(
+                'nip39_publish_relay',
+                [
+                    'event' => $signed,
+                    'relay' => $relay,
+                    'pubkey' => $pubkey,
+                ],
+                $dedupe
+            );
+        }
+        $publicationJobs[$relay] = $dedupe;
+    }
+    if (!$publicationJobs) {
+        return bridge_nip39_fail(
+            $job,
+            $payload,
+            'No secure Nostr publication relay is configured.'
+        );
+    }
+    ksort($publicationJobs, SORT_STRING);
+    $payload['publication_jobs'] = $publicationJobs;
+    bridge_nip39_save_payload($job, $payload, 'publishing');
+    return null;
+}
+
 /** @return null on success/skip, string error otherwise. */
 function bridge_execute_job(array $job): ?string
 {
@@ -1958,6 +2354,38 @@ function bridge_execute_job(array $job): ?string
     }
 
     switch ($job['type']) {
+        case 'nip39_identity':
+            return bridge_nip39_execute_identity($job);
+
+        case 'nip39_publish_relay': {
+            $event = $p['event'] ?? null;
+            $relay = is_string($p['relay'] ?? null) ? $p['relay'] : '';
+            $pubkey = strtolower((string)($p['pubkey'] ?? ''));
+            if (!is_array($event)
+                || !fm_event_verify($event)
+                || (int)($event['kind'] ?? -1) !== NIP39_KIND
+                || strtolower((string)($event['pubkey'] ?? '')) !== $pubkey
+                || !is_hex64($pubkey)
+                || relay_url_set([$relay]) !== [$relay]) {
+                throw new BridgeSkip(
+                    'invalid NIP-39 relay-publication payload'
+                );
+            }
+            if (relay_find_event((string)$event['id'], [$relay]) !== null) {
+                return null;
+            }
+            $results = relay_publish($event, [$relay], 5.0);
+            if (relay_publish_ok($results)) return null;
+            $result = (string)($results[$relay] ?? 'error: no response');
+            if (str_starts_with($result, 'rejected:')) {
+                return $result;
+            }
+            throw new BridgeDefer(
+                'relay publication pending: ' . $result,
+                300
+            );
+        }
+
         case 'github_delivery':
             return bridge_ingest_github_delivery($p);
 

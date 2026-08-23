@@ -22,6 +22,14 @@ small{color:#666}
 .signin{margin-top:.9rem}.signin small{display:block;margin-top:.35rem}
 .error{color:#b00020;margin-top:.6rem}
 code{background:#f0f0f2;padding:.1em .35em;border-radius:4px;font-size:.9em;word-break:break-all}
+.card{margin-top:1.5rem;padding:1rem 1.1rem;border:1px solid #ddd;border-radius:10px;background:#fafafa}
+.steps{list-style:none;padding:0}.steps li{display:flex;gap:.65rem;align-items:flex-start;color:#666}
+.steps li.current{color:#1a1a1a;font-weight:600}.steps li.done{color:#0a7d28}
+.stepmark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 1.6rem;height:1.6rem;
+          border:1px solid currentColor;border-radius:50%;font-size:.85rem}
+.proof{display:block;white-space:pre-wrap;margin:.7rem 0;padding:.7rem;background:#f0f0f2;border-radius:6px}
+.field{width:100%;box-sizing:border-box;padding:.65rem;border:1px solid #aaa;border-radius:6px;font:inherit}
+.identity-list{margin:.7rem 0}.identity-list li{margin:.25rem 0}
 </style>
 </head>
 <body>
@@ -66,6 +74,48 @@ content from crossing.</small></p>
 
 <div id="statusbox"></div>
 <p><button class="btn ghost" id="check">Refresh status</button></p>
+<section id="nip39-section" class="card" style="display:none" aria-labelledby="nip39-title">
+  <h2 id="nip39-title">Show your GitHub account on Nostr <small>(optional)</small></h2>
+  <p>This adds a verified GitHub link beside activity signed by your Nostr
+  key. It is public profile information. It does not change your bridge link,
+  permissions, or how content crosses.</p>
+  <ol id="nip39-steps" class="steps">
+    <li data-step="gist"><span class="stepmark">1</span><span>Create one GitHub Gist containing the proof below—for example, in a file named <code>nostr.txt</code>. The filename does not matter.</span></li>
+    <li data-step="review"><span class="stepmark">2</span><span>Paste its URL and review the complete public identity list.</span></li>
+    <li data-step="sign"><span class="stepmark">3</span><span>Approve one identity update in Amber.</span></li>
+    <li data-step="publish"><span class="stepmark">4</span><span>The signed update is saved and published to Nostr relays.</span></li>
+  </ol>
+  <div id="nip39-setup">
+    <p><strong>Put this exact single line in the Gist’s only file:</strong></p>
+    <code id="nip39-proof" class="proof"></code>
+    <p><button class="btn ghost" id="nip39-copy" type="button">Copy proof text</button>
+       <a class="btn gh" href="https://gist.github.com/" target="_blank" rel="noopener noreferrer">Create public GitHub Gist</a></p>
+    <label for="nip39-gist-url"><strong>Gist URL</strong></label>
+    <input class="field" id="nip39-gist-url" type="url"
+      placeholder="https://gist.github.com/your-name/…" autocomplete="off">
+    <p><button class="btn no" id="nip39-start" type="button">Check proof and prepare update</button></p>
+  </div>
+  <div id="nip39-workflow" style="display:none">
+    <p id="nip39-message" aria-live="polite"></p>
+    <div id="nip39-preview" style="display:none">
+      <p><strong>Public identities after this update:</strong></p>
+      <ul id="nip39-identities" class="identity-list"></ul>
+      <p><small>The complete current list is preserved. Only the
+      <span id="nip39-managed-account"></span> claim is added, replaced, or
+      removed.</small></p>
+      <button class="btn no" id="nip39-confirm" type="button">Approve this identity update</button>
+      <button class="btn ghost" id="nip39-cancel" type="button">Cancel</button>
+    </div>
+    <p id="nip39-auth" style="display:none"></p>
+    <div class="error" id="nip39-error" role="alert"></div>
+  </div>
+  <details>
+    <summary>Remove the public GitHub proof</summary>
+    <p>This republishes your complete identity list without this GitHub
+    account. It does not unlink the bridge and does not delete the Gist.</p>
+    <button class="btn ghost" id="nip39-remove" type="button">Prepare removal</button>
+  </details>
+</section>
 <p id="why" style="display:none"><small>Why link both? Nostr side: your GitHub
 issues and comments get <em>your</em> cryptographic signature instead of the
 labelled bridge signature. GitHub side: your Nostr issues and replies use your
@@ -79,6 +129,22 @@ content.</small></p>
   const linkSection = document.getElementById('link-section');
   const linkBody = document.getElementById('link-body');
   const HEX64 = /^[0-9a-f]{64}$/;
+  let nip39Workflow = null;
+  let nip39AdvanceInFlight = false;
+  let nip39StatusInFlight = false;
+  let nip39Poll = null;
+  const nip39TerminalPhases = [
+    'published',
+    'published_partially',
+    'publication_failed',
+    'already_current',
+    'nothing_to_remove',
+    'cancelled',
+    'failed'
+  ];
+  const html = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[ch]);
   const show = (html) => { box.className = 'show'; box.innerHTML = html; };
   const showLinkActions = (visible) => {
     linkSection.style.display = visible ? '' : 'none';
@@ -103,6 +169,179 @@ content.</small></p>
       throw new Error(result.error || ('The bridge returned HTTP ' + response.status + '.'));
     }
     return result;
+  };
+
+  const nip39Request = async (body = null) => {
+    const response = await fetch('/v1/nip39.php', {
+      method: body === null ? 'GET' : 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: body === null
+        ? {'Cache-Control': 'no-cache'}
+        : {'Content-Type': 'application/json'},
+      body: body === null ? undefined : JSON.stringify(body)
+    });
+    let result;
+    try {
+      result = await response.json();
+    } catch (_) {
+      throw new Error('The identity service returned an invalid response.');
+    }
+    if (!response.ok) {
+      throw new Error(result.error || ('Identity service HTTP ' + response.status));
+    }
+    return result;
+  };
+
+  const nip39SetStep = (current) => {
+    const order = ['gist', 'review', 'sign', 'publish'];
+    const index = order.indexOf(current);
+    document.querySelectorAll('#nip39-steps li').forEach(item => {
+      const itemIndex = order.indexOf(item.dataset.step);
+      item.className = itemIndex < index ? 'done' : (itemIndex === index ? 'current' : '');
+      item.querySelector('.stepmark').textContent =
+        itemIndex < index ? '✓' : String(itemIndex + 1);
+    });
+  };
+
+  const nip39PhasePresentation = (workflow) => {
+    const phase = workflow?.phase || '';
+    if (['preparing', 'reading_current'].includes(phase)) {
+      return ['review', 'Checking the Gist and reading your current Nostr identity list…'];
+    }
+    if (phase === 'checking_current') {
+      return ['sign', 'Checking once more for identity changes before asking Amber…'];
+    }
+    if (phase === 'awaiting_confirmation') {
+      return ['review', workflow.notice || 'Review the complete identity list below. Nothing has been signed or published yet.'];
+    }
+    if (['ready_to_sign', 'awaiting_signature'].includes(phase)) {
+      return ['sign', 'Waiting for Amber to approve this one public identity update…'];
+    }
+    if (['signed', 'publishing'].includes(phase)) {
+      const publications = Object.values(workflow.publications || {});
+      const done = publications.filter(item => item.status === 'done').length;
+      return ['publish', 'Amber’s signature is safely recorded. Publishing to Nostr relays'
+        + (publications.length ? ' (' + done + ' of ' + publications.length + ' confirmed)…' : '…')];
+    }
+    if (phase === 'published') {
+      return ['publish', '✓ Your verified GitHub identity is published on Nostr.'];
+    }
+    if (phase === 'published_partially') {
+      return ['publish', 'Your identity is available on some relays; other relays rejected it.'];
+    }
+    if (phase === 'publication_failed') {
+      return ['publish', 'The signed identity update was saved, but every configured relay rejected it.'];
+    }
+    if (phase === 'already_current') {
+      return ['publish', '✓ This exact GitHub proof is already your current Nostr identity claim.'];
+    }
+    if (phase === 'nothing_to_remove') {
+      return ['publish', 'There is no current claim for this GitHub account to remove.'];
+    }
+    if (phase === 'cancelled') {
+      return ['gist', 'The unconfirmed identity update was cancelled. Nothing was signed or published.'];
+    }
+    if (phase === 'failed') {
+      return ['review', 'The identity update could not continue.'];
+    }
+    return ['gist', 'Create a Gist to begin.'];
+  };
+
+  const renderNip39 = (result) => {
+    if (!result?.available) return;
+    nip39Workflow = result.workflow;
+    const section = document.getElementById('nip39-section');
+    section.style.display = '';
+    document.getElementById('nip39-proof').textContent = result.proof_text;
+    document.getElementById('nip39-managed-account').textContent =
+      'GitHub @' + result.github.login;
+    const workflowBox = document.getElementById('nip39-workflow');
+    const setup = document.getElementById('nip39-setup');
+    const preview = document.getElementById('nip39-preview');
+    const error = document.getElementById('nip39-error');
+    const auth = document.getElementById('nip39-auth');
+    error.textContent = '';
+    auth.style.display = 'none';
+    preview.style.display = 'none';
+
+    if (!nip39Workflow) {
+      setup.style.display = '';
+      workflowBox.style.display = 'none';
+      nip39SetStep('gist');
+      return;
+    }
+    workflowBox.style.display = '';
+    const [step, message] = nip39PhasePresentation(nip39Workflow);
+    nip39SetStep(step);
+    document.getElementById('nip39-message').textContent = message;
+    if (nip39Workflow.error
+        && !['preparing', 'reading_current', 'checking_current',
+             'awaiting_signature', 'publishing'].includes(nip39Workflow.phase)) {
+      error.textContent = nip39Workflow.error;
+    }
+    if (nip39Workflow.auth_url) {
+      auth.style.display = '';
+      auth.innerHTML = '<a class="btn no" href="' + html(nip39Workflow.auth_url)
+        + '" target="_blank" rel="noopener noreferrer">Open signer authorization</a>';
+    }
+    if (nip39Workflow.phase === 'awaiting_confirmation') {
+      preview.style.display = '';
+      const identities = nip39Workflow.identities || [];
+      document.getElementById('nip39-identities').innerHTML = identities.length
+        ? identities.map(item => '<li><code>' + html(item.identity)
+            + '</code> — proof <code>' + html(item.proof) + '</code></li>').join('')
+        : '<li>No external identities</li>';
+    }
+    setup.style.display = nip39TerminalPhases.includes(nip39Workflow.phase)
+      ? '' : 'none';
+  };
+
+  const advanceNip39 = () => {
+    if (nip39AdvanceInFlight || !nip39Workflow?.id) return;
+    const phase = nip39Workflow.phase;
+    if (phase === 'awaiting_confirmation'
+        || nip39TerminalPhases.includes(phase)) {
+      return;
+    }
+    nip39AdvanceInFlight = true;
+    // Deliberately not awaited: this POST may own a slow signer/relay phase.
+    // Fast read-only GET polling remains independent and keeps the visible
+    // phase current while cron remains the durable backstop.
+    nip39Request({
+        action: 'advance',
+        job_id: nip39Workflow.id
+      })
+      .then(renderNip39)
+      .catch(failure => {
+        document.getElementById('nip39-error').textContent = failure.message;
+      })
+      .finally(() => {
+        nip39AdvanceInFlight = false;
+      });
+  };
+
+  const loadNip39 = async () => {
+    try {
+      renderNip39(await nip39Request());
+      advanceNip39();
+      if (nip39Poll === null) {
+        nip39Poll = setInterval(async () => {
+          if (document.hidden || nip39StatusInFlight || !nip39Workflow
+              || nip39TerminalPhases.includes(nip39Workflow.phase)) return;
+          nip39StatusInFlight = true;
+          try {
+            renderNip39(await nip39Request());
+            advanceNip39();
+          } catch (_) {
+          } finally {
+            nip39StatusInFlight = false;
+          }
+        }, 2000);
+      }
+    } catch (failure) {
+      console.warn('identity status failed:', failure);
+    }
   };
 
   const signInWithNostr = async (button) => {
@@ -165,8 +404,10 @@ content.</small></p>
   const render = (r) => {
     if (r.fully_linked) {
       show('✅ Fully bridged: GitHub <strong>@' + r.github.login + '</strong> ↔ nostr <code>' +
-           (r.nostr.npub || '').slice(0, 20) + '…</code>. Nothing more to do.');
+           (r.nostr.npub || '').slice(0, 20) + '…</code>. Core linking is complete; ' +
+           'the public profile proof below remains optional.');
       showLinkActions(false);
+      loadNip39();
       return;
     }
     if (r.github && r.nostr === null) {
@@ -186,6 +427,77 @@ content.</small></p>
       bindNostrSignIn();
     }
     showLinkActions(true);
+  };
+  document.getElementById('nip39-copy').onclick = async () => {
+    const proof = document.getElementById('nip39-proof').textContent;
+    try {
+      await navigator.clipboard.writeText(proof);
+      document.getElementById('nip39-copy').textContent = 'Copied ✓';
+    } catch (_) {
+      document.getElementById('nip39-error').textContent =
+        'Copy failed; select the proof text manually.';
+    }
+  };
+  document.getElementById('nip39-start').onclick = async () => {
+    const gistUrl = document.getElementById('nip39-gist-url').value.trim();
+    document.getElementById('nip39-error').textContent = '';
+    nip39SetStep('review');
+    document.getElementById('nip39-workflow').style.display = '';
+    document.getElementById('nip39-message').textContent =
+      'Saving this request, then checking the Gist and current Nostr identity list…';
+    try {
+      renderNip39(await nip39Request({
+        action: 'start',
+        mode: 'add',
+        gist_url: gistUrl
+      }));
+      advanceNip39();
+    } catch (failure) {
+      document.getElementById('nip39-error').textContent = failure.message;
+    }
+  };
+  document.getElementById('nip39-remove').onclick = async () => {
+    document.getElementById('nip39-error').textContent = '';
+    nip39SetStep('review');
+    document.getElementById('nip39-workflow').style.display = '';
+    document.getElementById('nip39-message').textContent =
+      'Reading the complete current identity list before preparing removal…';
+    try {
+      renderNip39(await nip39Request({
+        action: 'start',
+        mode: 'remove'
+      }));
+      advanceNip39();
+    } catch (failure) {
+      document.getElementById('nip39-error').textContent = failure.message;
+    }
+  };
+  document.getElementById('nip39-confirm').onclick = async () => {
+    if (!nip39Workflow?.id) return;
+    document.getElementById('nip39-preview').style.display = 'none';
+    nip39SetStep('sign');
+    document.getElementById('nip39-message').textContent =
+      'Confirmation saved. Checking for newer identity information before asking Amber…';
+    try {
+      renderNip39(await nip39Request({
+        action: 'confirm',
+        job_id: nip39Workflow.id
+      }));
+      advanceNip39();
+    } catch (failure) {
+      document.getElementById('nip39-error').textContent = failure.message;
+    }
+  };
+  document.getElementById('nip39-cancel').onclick = async () => {
+    if (!nip39Workflow?.id) return;
+    try {
+      renderNip39(await nip39Request({
+        action: 'cancel',
+        job_id: nip39Workflow.id
+      }));
+    } catch (failure) {
+      document.getElementById('nip39-error').textContent = failure.message;
+    }
   };
   const fetchStatus = async () => {
     const resp = await fetch('/v1/status.php?fresh=' + Date.now(), {

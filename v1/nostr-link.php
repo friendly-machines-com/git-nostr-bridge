@@ -38,7 +38,7 @@ if (!$fastStatusPoll) {
     require_once __DIR__ . '/lib/bridge.php';
 }
 
-const NL_PERMS = 'sign_event:5,sign_event:7,sign_event:1621,sign_event:1111,sign_event:1630,sign_event:1631,sign_event:1632,get_public_key,switch_relays,ping';
+const NL_PERMS = 'sign_event:5,sign_event:7,sign_event:1621,sign_event:1111,sign_event:1630,sign_event:1631,sign_event:1632,sign_event:10011,get_public_key,switch_relays,ping';
 // This is background relay listening, not a GUI response timeout. The browser
 // polls durable state separately, so a slow/missing approval never freezes UI.
 const NL_BACKGROUND_LISTEN_SECS = 30.0;
@@ -942,10 +942,14 @@ $troubleshooting
 <details>
 <summary>What the bridge is allowed to ask your signer to do</summary>
 <p>Sign mirrored repository stars, issues, comments, status changes, and deletion requests;
-confirm your public key; and choose connection relays. The bridge never receives
-your private key, and you can revoke the connection in your signer.</p>
-<p><small>Protocol permissions: Nostr kinds 5, 7, 1111, 1621, 1630, 1631, and
-1632; plus <code>get_public_key</code>, <code>switch_relays</code>, and
+confirm your public key; and choose connection relays. If you separately opt
+in on the account page, the bridge may also ask for one kind 10011 signature
+that publicly identifies your linked GitHub account. That profile assertion is
+never required for linking or bridging. The bridge never receives your private
+key, and you can revoke the connection in your signer.</p>
+<p><small>Protocol permissions: Nostr kinds 5, 7, 1111, 1621, 1630, 1631,
+1632, and the optional identity kind 10011; plus
+<code>get_public_key</code>, <code>switch_relays</code>, and
 <code>ping</code>.</small></p>
 </details>
 <p><a href="/">Identify with GitHub from the account page</a></p>

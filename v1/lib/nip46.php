@@ -473,7 +473,8 @@ function nip46_wait_connect(string $clientPriv, string $clientPk,
 function nip46_sign_event(string $clientPriv, string $clientPk,
                           string $bunkerUri, array $unsignedEv,
                           float $timeoutSecs = 8.0,
-                          ?callable $onAuthUrl = null): ?array
+                          ?callable $onAuthUrl = null,
+                          ?callable $onSignerError = null): ?array
 {
     // parse bunker://<pk>?relay=..&relay=..
     if (!preg_match('#^bunker://([0-9a-f]{64})(?:\?(.*))?$#', $bunkerUri, $m)) {
@@ -514,6 +515,18 @@ function nip46_sign_event(string $clientPriv, string $clientPk,
                 'error' => $error->getMessage(),
             ]);
             continue;
+        }
+        if ($resp !== null
+            && is_string($resp['error'] ?? null)
+            && $resp['error'] !== ''
+            && $onSignerError !== null) {
+            $message = preg_replace(
+                '/[\x00-\x1f\x7f]+/',
+                ' ',
+                $resp['error']
+            );
+            $message = substr(trim((string)$message), 0, 160);
+            if ($message !== '') $onSignerError($message);
         }
         if ($resp !== null && isset($resp['result'])) {
             $signed = json_decode($resp['result'], true);

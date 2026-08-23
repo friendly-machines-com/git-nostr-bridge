@@ -702,9 +702,13 @@
     const NIP34_STATUS_KINDS = Object.freeze([1630, 1631, 1632, 1633]);
     const NIP34_STATUS_KIND_SET = new Set(NIP34_STATUS_KINDS);
     const NIP39_EXTERNAL_IDENTITIES_KIND = 10011;
+    const NIP65_RELAY_LIST_KIND = 10002;
     const NIP39_AUTHOR_QUERY_LIMIT = 256;
     const NIP39_GITHUB_CLAIM_LIMIT = 8;
-    const NIP39_REVERIFY_MS = 5 * 60 * 1000;
+    const NIP39_GITHUB_PROOF_BUDGET = 32;
+    const NIP39_RELAY_QUERY_LIMIT = 12;
+    const NIP65_RELAYS_PER_AUTHOR = 4;
+    const NIP39_REVERIFY_MS = 60 * 60 * 1000;
     const REPOSITORY_TABS = new Set(["issues", "prs", "patches", "state"]);
     const HEX_64 = /^[0-9a-f]{64}$/;
     const HEX_128 = /^[0-9a-f]{128}$/;
@@ -1043,6 +1047,19 @@
         && file.truncated !== true
         && typeof file.content === "string"
         && file.content === nip39GithubProofText(npub);
+    }
+
+    function nip65WriteRelays(event) {
+      if (event?.kind !== NIP65_RELAY_LIST_KIND) return [];
+      return normalizeRelayUrls((event.tags || [])
+        .filter(tag => (
+          Array.isArray(tag)
+          && tag[0] === "r"
+          && typeof tag[1] === "string"
+          && (tag.length < 3 || tag[2] === "write")
+        ))
+        .map(tag => tag[1]))
+        .slice(0, NIP65_RELAYS_PER_AUTHOR);
     }
 
     function nip05IdentityLabel(pubkey) {
@@ -1934,6 +1951,7 @@
           heads.map(head => [head.pubkey.toLowerCase(), head])
         );
         const work = [];
+        let proofBudget = NIP39_GITHUB_PROOF_BUDGET;
 
         for (const pubkey of authorPubkeys) {
           const head = headByAuthor.get(pubkey);
@@ -1950,6 +1968,19 @@
           ) {
             continue;
           }
+          const claimCount = githubNip39Claims(head).length;
+          if (claimCount > proofBudget) {
+            // Optional enrichment beyond the deterministic aggregate budget
+            // remains unverified until a later refresh. A changed head must
+            // clear the old badge now; retaining an assertion from a
+            // superseded snapshot would be a false identity statement.
+            if (checked?.eventId !== head.id) {
+              this.checkedHeads.delete(pubkey);
+              if (this.githubByPubkey.delete(pubkey)) changed = true;
+            }
+            continue;
+          }
+          proofBudget -= claimCount;
           work.push({ pubkey, head, checked });
         }
 
@@ -2341,11 +2372,65 @@ async loadRepoOnce(repoPath) {
           });
         }
 
+        // NIP-65 write relays are where an author's regular replaceable
+        // events should be found. Relay-list and identity snapshots are
+        // reduced independently, so either may arrive first.
+        const relayListFilters = filters.map(filter => ({
+          ...filter,
+          kinds: [NIP65_RELAY_LIST_KIND]
+        }));
+        try {
+          const freshRelayLists = await nostrService.fetchEvents(
+            relayListFilters,
+            2500,
+            this.externalIdentityRelayUrls,
+            false
+          );
+          this.cacheEvents(freshRelayLists);
+        } catch (_) {}
+        const relayListCandidates = this.cachedEvents(event => (
+          event.kind === NIP65_RELAY_LIST_KIND
+          && authorSet.has(event.pubkey)
+        ));
+        try {
+          await this.fetchDeletionRequests(
+            relayListCandidates.map(event => event.id),
+            [],
+            this.externalIdentityRelayUrls,
+            false
+          );
+        } catch (_) {}
+        const relayListDeletionIndex = buildDeletionIndex(
+          this.cachedEvents(event => event.kind === 5)
+        );
+        const relayListHeads = activeReplaceableEvents(
+          relayListCandidates,
+          NIP65_RELAY_LIST_KIND,
+          relayListDeletionIndex
+        );
+        const defaultIdentityRelays = normalizeRelayUrls(DEFAULT_RELAYS);
+        const collaborationRelays = normalizeRelayUrls([
+          ...defaultIdentityRelays,
+          ...normalizeRelayUrls(this.externalIdentityRelayUrls)
+            .filter(relay => !defaultIdentityRelays.includes(relay))
+            .slice(0, Math.max(0, 8 - defaultIdentityRelays.length))
+        ]);
+        const personalRelays = normalizeRelayUrls(
+          relayListHeads.flatMap(nip65WriteRelays)
+        ).filter(relay => !collaborationRelays.includes(relay));
+        const identityRelays = [
+          ...collaborationRelays,
+          ...personalRelays.slice(
+            0,
+            Math.max(0, NIP39_RELAY_QUERY_LIMIT - collaborationRelays.length)
+          )
+        ];
+
         try {
           const fresh = await nostrService.fetchEvents(
             filters,
             2500,
-            this.externalIdentityRelayUrls,
+            identityRelays,
             false
           );
           this.cacheEvents(fresh);
@@ -2362,7 +2447,7 @@ async loadRepoOnce(repoPath) {
           await this.fetchDeletionRequests(
             candidates.map(event => event.id),
             [],
-            this.externalIdentityRelayUrls,
+            identityRelays,
             false
           );
         } catch (_) {

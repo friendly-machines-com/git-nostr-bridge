@@ -20,6 +20,7 @@ function element(id) {
     textContent: "",
     disabled: false,
     onclick: null,
+    value: "",
     style: {display: ""},
     insertAdjacentHTML(_position, value) {
       this.innerHTML += value;
@@ -36,12 +37,42 @@ for (const id of [
   "why",
   "nostr-signin",
   "nostr-signin-error",
+  "nip39-section",
+  "nip39-proof",
+  "nip39-managed-account",
+  "nip39-workflow",
+  "nip39-setup",
+  "nip39-preview",
+  "nip39-error",
+  "nip39-auth",
+  "nip39-message",
+  "nip39-identities",
+  "nip39-gist-url",
+  "nip39-start",
+  "nip39-copy",
+  "nip39-remove",
+  "nip39-confirm",
+  "nip39-cancel",
 ]) {
   elements.set(id, element(id));
 }
+const nip39Steps = ["gist", "review", "sign", "publish"].map(step => {
+  const mark = {textContent: ""};
+  return {
+    className: "",
+    dataset: {step},
+    querySelector(selector) {
+      return selector === ".stepmark" ? mark : null;
+    },
+  };
+});
 global.document = {
+  hidden: false,
   getElementById(id) {
     return elements.get(id) || null;
+  },
+  querySelectorAll(selector) {
+    return selector === "#nip39-steps li" ? nip39Steps : [];
   },
 };
 
@@ -74,12 +105,69 @@ global.window = {
 };
 
 const requests = [];
+let nip39Workflow = null;
 global.fetch = async (url, options = {}) => {
   const method = options.method || "GET";
   const body = options.body ? JSON.parse(options.body) : null;
   requests.push({url, method, body});
   let payload;
-  if (method === "GET") {
+  if (url === "/v1/nip39.php" && method === "POST") {
+    if (body?.action === "start") {
+      nip39Workflow = {
+        id: 41,
+        status: "pending",
+        phase: "preparing",
+        action: body.mode,
+        identities: [],
+        publications: {},
+      };
+    } else if (body?.action === "advance"
+        && nip39Workflow?.phase === "preparing") {
+      nip39Workflow = {
+        ...nip39Workflow,
+        phase: "awaiting_confirmation",
+        identities: [
+          {identity: "github:alice", proof: "abcde"},
+          {identity: "mastodon:example/@alice", proof: "post-id"},
+        ],
+      };
+    } else if (body?.action === "confirm") {
+      nip39Workflow = {
+        ...nip39Workflow,
+        phase: "ready_to_sign",
+      };
+    } else if (body?.action === "advance"
+        && nip39Workflow?.phase === "ready_to_sign") {
+      nip39Workflow = {
+        ...nip39Workflow,
+        status: "done",
+        phase: "publishing",
+        event_id: "e".repeat(64),
+        publications: {
+          "wss://nos.lol": {status: "pending", last_error: null},
+        },
+      };
+    } else {
+      throw new Error("unexpected NIP-39 request");
+    }
+    payload = {
+      available: true,
+      github: {login: "alice"},
+      nostr: {npub: "npub1test", pubkey},
+      proof_text:
+        "Verifying that I control the following Nostr public key: npub1test",
+      workflow: nip39Workflow,
+    };
+  } else if (method === "GET" && url === "/v1/nip39.php") {
+    payload = {
+      available: true,
+      github: {login: "alice"},
+      nostr: {npub: "npub1test", pubkey},
+      proof_text:
+        "Verifying that I control the following Nostr public key: npub1test",
+      workflow: nip39Workflow,
+    };
+  } else if (method === "GET") {
     payload = {
       browser_session: false,
       identity_recognized: false,
@@ -116,6 +204,15 @@ global.alert = () => {
   throw new Error("status UX must not use alert");
 };
 global.setTimeout = () => 0;
+global.setInterval = () => 1;
+Object.defineProperty(global, "navigator", {
+  configurable: true,
+  value: {
+    clipboard: {
+      async writeText() {},
+    },
+  },
+});
 
 new Function(script)();
 
@@ -133,10 +230,12 @@ async function settle() {
   await button.onclick();
   await settle();
 
-  if (requests.length !== 3
+  if (requests.length !== 4
       || requests[0].method !== "GET"
       || requests[1].body?.action !== "challenge"
-      || requests[2].body?.action !== "recover") {
+      || requests[2].body?.action !== "recover"
+      || requests[3].url !== "/v1/nip39.php"
+      || requests[3].method !== "GET") {
     throw new Error("browser recovery request sequence is wrong");
   }
   if (!elements.get("statusbox").innerHTML.includes("Fully bridged")
@@ -147,12 +246,44 @@ async function settle() {
       || elements.get("link-body").style.display !== "none") {
     throw new Error("linking actions remained visible after recovery");
   }
+  if (elements.get("nip39-section").style.display !== ""
+      || !elements.get("nip39-proof").textContent.includes("npub1test")) {
+    throw new Error("optional NIP-39 setup was not shown after full linking");
+  }
   if (html.includes("Recover with nos2x")
       || html.includes("Identify this browser with nos2x")
       || html.includes("Not linked yet")) {
     throw new Error("obsolete recovery wording remains in index.html");
   }
-  console.log("index.html Nostr sign-in UX OK");
+
+  elements.get("nip39-gist-url").value =
+    "https://gist.github.com/alice/abcde";
+  await elements.get("nip39-start").onclick();
+  await settle();
+  await settle();
+  if (nip39Workflow?.phase !== "awaiting_confirmation"
+      || elements.get("nip39-preview").style.display !== ""
+      || !elements.get("nip39-identities").innerHTML.includes("mastodon:example/@alice")) {
+    throw new Error("NIP-39 proof preparation did not reach complete-set review");
+  }
+  const actionsBeforeConfirmation = requests
+    .filter(request => request.url === "/v1/nip39.php" && request.method === "POST")
+    .map(request => request.body?.action);
+  if (JSON.stringify(actionsBeforeConfirmation) !== JSON.stringify([
+    "start",
+    "advance",
+  ])) {
+    throw new Error("NIP-39 UX requested signing before explicit confirmation");
+  }
+
+  await elements.get("nip39-confirm").onclick();
+  await settle();
+  await settle();
+  if (nip39Workflow?.phase !== "publishing"
+      || !elements.get("nip39-message").textContent.includes("signature is safely recorded")) {
+    throw new Error("confirmed NIP-39 UX did not advance to durable publication");
+  }
+  console.log("index.html account and NIP-39 UX OK");
 })().catch(error => {
   console.error(error.stack || error.message);
   process.exitCode = 1;

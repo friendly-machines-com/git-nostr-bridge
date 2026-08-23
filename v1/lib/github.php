@@ -11,6 +11,57 @@ const GH_API = 'https://api.github.com';
 
 class GhError extends RuntimeException {}
 
+/**
+ * Read one public-or-unlisted Gist without a GitHub user token.
+ *
+ * NIP-39 proof verification must not expand the GitHub App's permissions.
+ * The Gist ID is validated before being appended to this fixed API origin, so
+ * this helper cannot become a general unauthenticated request or SSRF path.
+ */
+function gh_public_gist(string $gistId, int $timeout = 4): array
+{
+    $gistId = strtolower($gistId);
+    if (!preg_match('/^[0-9a-f]{5,64}$/D', $gistId)) {
+        throw new InvalidArgumentException('invalid GitHub Gist ID');
+    }
+    $test = $GLOBALS['__fm_test_gh_public_gist'] ?? null;
+    if (is_callable($test)) {
+        $response = $test($gistId);
+        if (!is_array($response)) {
+            throw new GhError('test Gist response is not an array');
+        }
+        return $response;
+    }
+
+    $path = '/gists/' . rawurlencode($gistId);
+    $ch = curl_init(GH_API . $path);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => max(1, min(10, $timeout)),
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/vnd.github+json',
+            'User-Agent: friendly-machines-bridge',
+            'X-GitHub-Api-Version: 2022-11-28',
+        ],
+    ]);
+    $raw = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    if ($raw === false) throw new GhError("gist curl: $error");
+    $decoded = json_decode($raw ?: 'null', true);
+    if ($code >= 400) {
+        $message = is_array($decoded)
+            && is_string($decoded['message'] ?? null)
+            ? $decoded['message'] : '';
+        throw new GhError("github $code $path: $message", $code);
+    }
+    if (!is_array($decoded)) {
+        throw new GhError('GitHub returned an invalid Gist response');
+    }
+    return $decoded;
+}
+
 function gh_request(
     string $method,
     string $path,
