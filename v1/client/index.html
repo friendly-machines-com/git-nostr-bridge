@@ -110,6 +110,12 @@
     .badge-purple { background: #3d1f5e; color: #d2a8ff; border: 1px solid var(--accent); }
     .badge-green { background: #1c3d24; color: #7ee787; border: 1px solid var(--green); }
     .badge-blue { background: #112d4e; color: #79c0ff; border: 1px solid var(--blue); }
+    .external-identity {
+      color: var(--blue);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .external-identity:hover { text-decoration: underline; }
 
     .repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(350px, 100%), 1fr)); gap: 20px; margin-top: 16px; }
     .repo-card {
@@ -695,6 +701,10 @@
     const EVENT_CACHE_KEY = "nostrgit:nip34-events:v2";
     const NIP34_STATUS_KINDS = Object.freeze([1630, 1631, 1632, 1633]);
     const NIP34_STATUS_KIND_SET = new Set(NIP34_STATUS_KINDS);
+    const NIP39_EXTERNAL_IDENTITIES_KIND = 10011;
+    const NIP39_AUTHOR_QUERY_LIMIT = 256;
+    const NIP39_GITHUB_CLAIM_LIMIT = 8;
+    const NIP39_REVERIFY_MS = 5 * 60 * 1000;
     const REPOSITORY_TABS = new Set(["issues", "prs", "patches", "state"]);
     const HEX_64 = /^[0-9a-f]{64}$/;
     const HEX_128 = /^[0-9a-f]{128}$/;
@@ -976,6 +986,65 @@
       return values.length === 1 ? values[0] : null;
     }
 
+    function githubNip39Claims(event) {
+      if (event?.kind !== NIP39_EXTERNAL_IDENTITIES_KIND) return [];
+      const claims = new Map();
+      for (const tag of event.tags || []) {
+        if (
+          !Array.isArray(tag)
+          || tag.length < 3
+          || tag[0] !== "i"
+          || typeof tag[1] !== "string"
+          || typeof tag[2] !== "string"
+          || !tag[1].startsWith("github:")
+        ) {
+          continue;
+        }
+        const login = tag[1].slice("github:".length).toLowerCase();
+        const proof = tag[2].toLowerCase();
+        if (
+          !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(login)
+          || !/^[0-9a-f]{5,64}$/.test(proof)
+        ) {
+          continue;
+        }
+        claims.set(`${login}:${proof}`, { login, proof });
+      }
+      return Array.from(claims.values())
+        .sort((a, b) => (
+          a.login.localeCompare(b.login)
+          || a.proof.localeCompare(b.proof)
+        ))
+        .slice(0, NIP39_GITHUB_CLAIM_LIMIT);
+    }
+
+    function nip39GithubProofText(npub) {
+      return `Verifying that I control the following Nostr public key: ${npub}`;
+    }
+
+    function gistVerifiesNip39(gist, login, npub) {
+      if (
+        !gist
+        || typeof gist !== "object"
+        || !gist.owner
+        || typeof gist.owner.login !== "string"
+        || gist.owner.login.toLowerCase() !== login.toLowerCase()
+        || !gist.files
+        || typeof gist.files !== "object"
+        || Array.isArray(gist.files)
+      ) {
+        return false;
+      }
+      const files = Object.values(gist.files);
+      if (files.length !== 1) return false;
+      const file = files[0];
+      return !!file
+        && typeof file === "object"
+        && file.truncated !== true
+        && typeof file.content === "string"
+        && file.content === nip39GithubProofText(npub);
+    }
+
     function nip05IdentityLabel(pubkey) {
       const names = verificationService.domainCache.get(
         window.location.hostname
@@ -1008,7 +1077,7 @@
       return actorLabel(event);
     }
 
-    function attributionLabel(event) {
+    function attributionParts(event) {
       const pubkey = event.pubkey.toLowerCase();
       const origin = githubProxyUrl(event) ? "From GitHub" : "Posted on Nostr";
       let signer;
@@ -1022,7 +1091,42 @@
           ? `Signed by ${identity}’s Nostr key`
           : "Signed by the displayed Nostr user’s key";
       }
-      return `${actorLabel(event)} · ${origin} · ${signer}`;
+      const externalIdentities = pubkey === FRIENDLY_MACHINES_BRIDGE_PUBKEY
+        ? []
+        : externalIdentityService.githubIdentities(pubkey);
+      return {
+        actor: actorLabel(event),
+        externalIdentities,
+        origin,
+        signer
+      };
+    }
+
+    function attributionLabel(event) {
+      const parts = attributionParts(event);
+      return [
+        parts.actor,
+        ...parts.externalIdentities.map(identity => (
+          `GitHub @${identity.login} (verified via NIP-39)`
+        )),
+        parts.origin,
+        parts.signer
+      ].join(" · ");
+    }
+
+    function attributionHtml(event) {
+      const parts = attributionParts(event);
+      const external = parts.externalIdentities.map(identity => {
+        const login = escapeHtml(identity.login);
+        const url = `https://github.com/${encodeURIComponent(identity.login)}`;
+        return `<a class="external-identity" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="This GitHub account published the NIP-39 proof for this Nostr signing key">✓ GitHub @${login}</a>`;
+      });
+      return [
+        escapeHtml(parts.actor),
+        ...external,
+        escapeHtml(parts.origin),
+        escapeHtml(parts.signer)
+      ].join(" · ");
     }
 
     function technicalEventDetails(event) {
@@ -1190,6 +1294,31 @@
         }
       }
       return Array.from(latest.values());
+    }
+
+    function latestReplaceableEvents(events, kind) {
+      const latest = new Map();
+      for (const event of events) {
+        if (event?.kind !== kind || !HEX_64.test(event.pubkey || "")) continue;
+        const key = `${event.pubkey.toLowerCase()}:${kind}`;
+        const previous = latest.get(key);
+        if (
+          !previous
+          || event.created_at > previous.created_at
+          || (event.created_at === previous.created_at && event.id < previous.id)
+        ) {
+          latest.set(key, event);
+        }
+      }
+      return Array.from(latest.values());
+    }
+
+    function activeReplaceableEvents(events, kind, deletionIndex) {
+      // Select the replaceable head before applying its deletion. If the
+      // newest event was deleted, an older superseded snapshot must not
+      // silently become current again.
+      return latestReplaceableEvents(events, kind)
+        .filter(event => !eventIsDeleted(event, deletionIndex));
     }
 
     function buildDeletionIndex(events) {
@@ -1418,7 +1547,12 @@
         }
       }
 
-      async fetchEvents(filters, timeoutMs = 1500, relayUrls = this.relayUrls) {
+      async fetchEvents(
+        filters,
+        timeoutMs = 1500,
+        relayUrls = this.relayUrls,
+        recordWarnings = true
+      ) {
         if (typeof window.NostrTools?.verifyEvent !== "function") {
           throw new Error("Nostr signature verifier failed to load.");
         }
@@ -1453,8 +1587,10 @@
               try { ws.send(JSON.stringify(["CLOSE", subId])); } catch (_) {}
             });
             this.activeSubs.delete(subId);
-            for (const [relayUrl, reason] of failures) {
-              this.queryWarnings.push(`${relayUrl}: ${reason}`);
+            if (recordWarnings) {
+              for (const [relayUrl, reason] of failures) {
+                this.queryWarnings.push(`${relayUrl}: ${reason}`);
+              }
             }
             if (completedRelays.size === 0) {
               reject(new Error(
@@ -1709,6 +1845,167 @@
 
     const verificationService = new VerificationService();
 
+    // NIP-39 is presentation metadata only. It never authorizes a bridge
+    // crossing, selects a stored OAuth token, or establishes a server link.
+    class ExternalIdentityService {
+      constructor() {
+        this.githubByPubkey = new Map();
+        this.checkedHeads = new Map();
+      }
+
+      githubIdentities(pubkey) {
+        if (!HEX_64.test(pubkey || "")) return [];
+        return this.githubByPubkey.get(pubkey.toLowerCase()) || [];
+      }
+
+      async verifyGithubClaim(pubkey, claim) {
+        let npub;
+        try {
+          npub = window.NostrTools?.nip19?.npubEncode(pubkey);
+        } catch (_) {
+          return { status: "unavailable" };
+        }
+        if (typeof npub !== "string" || !npub.startsWith("npub1")) {
+          return { status: "unavailable" };
+        }
+
+        let response;
+        try {
+          response = await fetchWithTimeout(
+            `https://api.github.com/gists/${encodeURIComponent(claim.proof)}`,
+            {
+              cache: "no-store",
+              headers: {
+                Accept: "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2026-03-10"
+              }
+            },
+            3000
+          );
+        } catch (_) {
+          return { status: "unavailable" };
+        }
+        if (response.status === 404) return { status: "invalid" };
+        if (!response.ok) return { status: "unavailable" };
+        try {
+          const gist = await response.json();
+          return gistVerifiesNip39(gist, claim.login, npub)
+            ? { status: "valid", identity: claim }
+            : { status: "invalid" };
+        } catch (_) {
+          return { status: "unavailable" };
+        }
+      }
+
+      async verifyHead(pubkey, head) {
+        const claims = githubNip39Claims(head);
+        if (claims.length === 0) {
+          return { status: "valid", identities: [] };
+        }
+        const results = [];
+        // Claims for one author are verified in canonical order. The worker
+        // pool below is therefore also the actual upper bound on concurrent
+        // GitHub requests, rather than merely a bound on concurrent authors.
+        for (const claim of claims) {
+          results.push(await this.verifyGithubClaim(pubkey, claim));
+        }
+        const identities = new Map();
+        for (const result of results) {
+          if (result.status === "valid") {
+            identities.set(result.identity.login, result.identity);
+          }
+        }
+        if (identities.size > 0) {
+          return {
+            status: "valid",
+            identities: Array.from(identities.values())
+              .sort((a, b) => a.login.localeCompare(b.login))
+          };
+        }
+        return results.some(result => result.status === "unavailable")
+          ? { status: "unavailable", identities: [] }
+          : { status: "valid", identities: [] };
+      }
+
+      async reconcile(authorPubkeys, heads) {
+        const now = Date.now();
+        let changed = false;
+        const headByAuthor = new Map(
+          heads.map(head => [head.pubkey.toLowerCase(), head])
+        );
+        const work = [];
+
+        for (const pubkey of authorPubkeys) {
+          const head = headByAuthor.get(pubkey);
+          if (!head) {
+            this.checkedHeads.delete(pubkey);
+            if (this.githubByPubkey.delete(pubkey)) changed = true;
+            continue;
+          }
+          const checked = this.checkedHeads.get(pubkey);
+          if (
+            checked
+            && checked.eventId === head.id
+            && now - checked.checkedAt < NIP39_REVERIFY_MS
+          ) {
+            continue;
+          }
+          work.push({ pubkey, head, checked });
+        }
+
+        // GitHub's unauthenticated Gist API is deliberately approached with a
+        // small fixed concurrency. Identity enrichment is background work and
+        // must not create an unbounded request burst from a large discussion.
+        let next = 0;
+        const workers = Array.from(
+          { length: Math.min(4, work.length) },
+          async () => {
+            while (next < work.length) {
+              const item = work[next++];
+              const result = await this.verifyHead(item.pubkey, item.head);
+              const current = this.checkedHeads.get(item.pubkey);
+              if (
+                current
+                && current.eventId !== item.head.id
+                && current.checkedAt > (item.checked?.checkedAt || 0)
+              ) {
+                continue;
+              }
+              this.checkedHeads.set(item.pubkey, {
+                eventId: item.head.id,
+                checkedAt: Date.now()
+              });
+              if (result.status === "unavailable") {
+                if (item.checked?.eventId !== item.head.id) {
+                  if (this.githubByPubkey.delete(item.pubkey)) changed = true;
+                }
+                continue;
+              }
+              const previous = this.githubByPubkey.get(item.pubkey) || [];
+              const previousKey = previous
+                .map(identity => `${identity.login}:${identity.proof}`)
+                .join(",");
+              const nextKey = result.identities
+                .map(identity => `${identity.login}:${identity.proof}`)
+                .join(",");
+              if (previousKey !== nextKey) {
+                changed = true;
+                if (result.identities.length > 0) {
+                  this.githubByPubkey.set(item.pubkey, result.identities);
+                } else {
+                  this.githubByPubkey.delete(item.pubkey);
+                }
+              }
+            }
+          }
+        );
+        await Promise.all(workers);
+        return changed;
+      }
+    }
+
+    const externalIdentityService = new ExternalIdentityService();
+
     // ==========================================
     // 3. GIT ENGINE SERVICE
     // ==========================================
@@ -1928,6 +2225,9 @@ async loadRepoOnce(repoPath) {
         this.commentDrafts = new Map();
         this.nostrEventCache = this.loadEventCache();
         this.nostrPollTimer = null;
+        this.externalIdentityRelayUrls = DEFAULT_RELAYS;
+        this.externalIdentityRefresh = null;
+        this.externalIdentityRefreshPending = false;
         this.navigationGeneration = 0;
         this.issueModalRepoId = null;
         this.prModalRepoId = null;
@@ -1981,7 +2281,12 @@ async loadRepoOnce(repoPath) {
         return Array.from(this.nostrEventCache.values()).filter(predicate);
       }
 
-      async fetchDeletionRequests(eventIds, addresses, relayUrls) {
+      async fetchDeletionRequests(
+        eventIds,
+        addresses,
+        relayUrls,
+        recordWarnings = true
+      ) {
         const filters = [];
         const ids = sortedUniqueStrings(eventIds.filter(id => HEX_64.test(id)));
         const coordinates = sortedUniqueStrings(addresses.filter(Boolean));
@@ -1989,8 +2294,121 @@ async loadRepoOnce(repoPath) {
         if (coordinates.length > 0) filters.push({ kinds: [5], "#a": coordinates });
         if (filters.length === 0) return;
 
-        const deletions = await nostrService.fetchEvents(filters, 4000, relayUrls);
+        const deletions = await nostrService.fetchEvents(
+          filters,
+          4000,
+          relayUrls,
+          recordWarnings
+        );
         this.cacheEvents(deletions);
+      }
+
+      visibleAttributionPubkeys() {
+        const pubkeys = [];
+        for (const data of Object.values(this.nostrData)) {
+          for (const collection of [
+            data.issues,
+            data.pullRequests,
+            data.patches,
+            data.comments
+          ]) {
+            for (const event of collection || []) {
+              if (
+                event?.pubkey !== FRIENDLY_MACHINES_BRIDGE_PUBKEY
+                && !eventIsDeleted(event, data.deletionIndex)
+              ) {
+                pubkeys.push(event.pubkey);
+              }
+            }
+          }
+        }
+        // Author pubkeys are a set. Canonicalize before applying the resource
+        // cap so relay delivery and repository enumeration order cannot decide
+        // whose optional identity is enriched.
+        return sortedUniqueStrings(pubkeys)
+          .slice(0, NIP39_AUTHOR_QUERY_LIMIT);
+      }
+
+      async refreshExternalIdentities() {
+        const authors = this.visibleAttributionPubkeys();
+        if (authors.length === 0) return false;
+        const authorSet = new Set(authors);
+        const filters = [];
+        for (let offset = 0; offset < authors.length; offset += 64) {
+          filters.push({
+            kinds: [NIP39_EXTERNAL_IDENTITIES_KIND],
+            authors: authors.slice(offset, offset + 64)
+          });
+        }
+
+        try {
+          const fresh = await nostrService.fetchEvents(
+            filters,
+            2500,
+            this.externalIdentityRelayUrls,
+            false
+          );
+          this.cacheEvents(fresh);
+        } catch (_) {
+          // Optional identity metadata never blocks or degrades repository
+          // collaboration. Cached verified identities remain usable.
+        }
+
+        const candidates = this.cachedEvents(event => (
+          event.kind === NIP39_EXTERNAL_IDENTITIES_KIND
+          && authorSet.has(event.pubkey)
+        ));
+        try {
+          await this.fetchDeletionRequests(
+            candidates.map(event => event.id),
+            [],
+            this.externalIdentityRelayUrls,
+            false
+          );
+        } catch (_) {
+          // As above: inability to refresh optional deletion state does not
+          // turn the repository activity query into a failure.
+        }
+        const deletionIndex = buildDeletionIndex(
+          this.cachedEvents(event => event.kind === 5)
+        );
+        const heads = activeReplaceableEvents(
+          candidates,
+          NIP39_EXTERNAL_IDENTITIES_KIND,
+          deletionIndex
+        );
+        return externalIdentityService.reconcile(authors, heads);
+      }
+
+      renderExternalIdentityUpdate() {
+        if (this.currentIssueId && this.currentThreadType === "pr") {
+          this.renderPrView(this.currentIssueId);
+        } else if (this.currentIssueId && this.currentThreadType === "patch") {
+          this.renderPatchView(this.currentIssueId);
+        } else if (this.currentIssueId) {
+          this.renderIssueView(this.currentIssueId);
+        } else if (this.currentRepo) {
+          this.loadNostrTabs();
+        }
+      }
+
+      scheduleExternalIdentityRefresh() {
+        if (this.externalIdentityRefresh) {
+          this.externalIdentityRefreshPending = true;
+          return;
+        }
+        this.externalIdentityRefresh = this.refreshExternalIdentities()
+          .then(changed => {
+            if (changed) this.renderExternalIdentityUpdate();
+          })
+          .catch(() => {})
+          .finally(() => {
+            this.externalIdentityRefresh = null;
+            if (this.externalIdentityRefreshPending) {
+              this.externalIdentityRefreshPending = false;
+              window.queueMicrotask(() => this.scheduleExternalIdentityRefresh());
+            }
+          });
       }
 
       startNostrPolling() {
@@ -2687,6 +3105,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                 .flatMap(event => tagValues(event, "relays"))
             ]);
           }
+          this.externalIdentityRelayUrls = collaborationRelays;
 
           // NIP-09 lookups are reference-based too. Known metadata supplies
           // exact coordinates; NIP-05 publisher keys also let us discover an
@@ -3024,6 +3443,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             this.renderIssueView(this.currentIssueId);
           }
           else this.loadNostrTabs();
+          // Repository activity is already rendered before optional NIP-39
+          // metadata is queried and externally verified. Identity-provider or
+          // relay latency must never delay the primary client interface.
+          this.scheduleExternalIdentityRefresh();
           if (this.nostrRefreshPending) {
             this.nostrRefreshPending = false;
             window.queueMicrotask(() => this.refreshAllNostr(false));
@@ -3524,7 +3947,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   <div class="nostr-item-meta">
                     ${escapeHtml(details.join(" · "))}
                     ${details.length ? " · " : ""}
-                    by <span>${escapeHtml(attributionLabel(event))}</span>
+                    by <span>${attributionHtml(event)}</span>
                     · ${escapeHtml(dateLabel)}
                   </div>
                 </div>
@@ -3870,7 +4293,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   <details class="patch-event"${series.length === 1 || index === 0 ? " open" : ""}>
                     <summary>${patchLabel}: ${escapeHtml(patchSubject(patch.content))} · ${patchCommentCount} ${patchCommentCount === 1 ? "comment" : "comments"}</summary>
                     <div class="nostr-item-meta" style="padding:0 12px 10px;">
-                      by <span>${escapeHtml(attributionLabel(patch))}</span>
+                      by <span>${attributionHtml(patch)}</span>
                       · ${escapeHtml(patchDate)}
                       ${parentId ? `<br>Replies to <code title="${escapeHtml(parentId)}">${escapeHtml(parentId.slice(0, 12))}…</code>` : ""}
                     </div>
@@ -3902,7 +4325,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           return `
             <article class="comment-item" style="margin-left:${depth * 24}px;" data-depth="${depth}">
               <div class="nostr-item-meta">
-                <span>${escapeHtml(attributionLabel(comment))}</span>
+                <span>${attributionHtml(comment)}</span>
                 · ${escapeHtml(date)}
               </div>
               <div class="nostr-item-content">${escapeHtml(comment.content)}</div>
@@ -3945,7 +4368,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               <div>
                 <h3 class="nostr-item-title">${escapeHtml(title)}</h3>
                 <div class="nostr-item-meta">
-                  ${root.kind === 1621 ? "opened" : "proposed"} by <span>${escapeHtml(attributionLabel(root))}</span>
+                  ${root.kind === 1621 ? "opened" : "proposed"} by <span>${attributionHtml(root)}</span>
                   · ${escapeHtml(rootDate)}
                 </div>
               </div>

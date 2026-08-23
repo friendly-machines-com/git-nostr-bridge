@@ -4,7 +4,8 @@ This behavior follows
 [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md),
 [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md),
 [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md), and
-[NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md).
+[NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md), and
+[NIP-39](https://github.com/nostr-protocol/nips/blob/master/39.md).
 
 The client assumes no causal ordering from relays, timestamps, relay
 responses, or event arrival. An issue, one of its comments, and that
@@ -143,6 +144,21 @@ the event came from GitHub or Nostr, and which key signed it. The deployment's
 public bridge key is an explicit client trust anchor, so an arbitrary event
 cannot label itself as bridge-signed merely by copying a `gh_user` tag. Raw
 event IDs and signing keys remain available under Technical details.
+
+For visible non-bridge authors, the client also queries kind `10011` NIP-39
+external-identity snapshots. Kind `10011` is regular replaceable: the client
+first selects exactly one winner per author by newest `created_at`, then lowest
+event ID, and only then applies deletion. It never unions claims from different
+versions or resurrects an older version when the winner was deleted. A GitHub
+claim is displayed as a link beside the existing byline only after GitHub's
+Gist API confirms that the named account owns a single-file Gist whose content
+is the exact NIP-39 proof for that author's npub. Relay and GitHub verification
+run after repository activity is rendered; failure leaves the ordinary Nostr
+byline unchanged. This assertion is optional presentation metadata. It never
+authorizes a bridge crossing, selects a GitHub token, or creates an account
+link. To bound background work deterministically, one refresh considers the
+lexically first 256 visible author keys and at most eight canonical GitHub
+claims from each author's current snapshot.
 
 After a relay acknowledgement, the already verified signed event is merged
 into the same cache immediately. Repository announcements are attempted on
