@@ -1,0 +1,22 @@
+# GitHub endpoint notes
+
+The architecture and schema of record are in [`../DESIGN`](../DESIGN).
+There is one active database: `../bridge.db`.
+
+- `login.php` starts optional GitHub App user authorization with a single-use
+  state and PKCE verifier bound to the browser's server-side link session.
+- `callback.php` exchanges the code, encrypts the expiring access and rotating
+  refresh tokens, and joins the Nostr half only after both identities have
+  been verified.
+- `webhook.php` verifies GitHub's HMAC and durably queues the raw delivery
+  before returning HTTP 202. Issue, comment, and Star deliveries are wake-up
+  inputs. Each observed Star actor/repository pair is retained in a durable
+  primary-keyed set and reconciled from that user's current
+  starred-repository collection; webhook delivery order is not treated as
+  state.
+- `../cron.php` owns App installation/repository reconciliation, token
+  rotation, repository mapping, event construction, signing, publication,
+  retries, and dead-letter handling.
+
+No endpoint in this directory creates a separate schema or stores plaintext
+GitHub tokens.

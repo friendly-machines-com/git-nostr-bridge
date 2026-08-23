@@ -1,0 +1,60 @@
+# Bridge v1 access rules (see DESIGN §10)
+
+# There is no application index in /v1. A mistaken navigation target must
+# fail closed instead of exposing an Apache-generated endpoint inventory.
+Options -Indexes
+
+# PHP responses contain account/session state and must never inherit the
+# hosting account's static max-age/Expires policy. Clear both Apache header
+# tables before setting one unambiguous private no-store policy.
+<FilesMatch "\.php$">
+    <IfModule mod_expires.c>
+        ExpiresActive Off
+    </IfModule>
+    <IfModule mod_headers.c>
+        Header onsuccess unset Cache-Control
+        Header always unset Cache-Control
+        Header always set Cache-Control "private, no-store, no-cache, must-revalidate, max-age=0"
+        Header onsuccess unset Expires
+        Header always unset Expires
+        Header always set Expires "0"
+        Header onsuccess unset Pragma
+        Header always unset Pragma
+        Header always set Pragma "no-cache"
+    </IfModule>
+</FilesMatch>
+
+# Development/control directories and dotfiles are never web content.
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# 1. Server-side includes must never be served or requested directly
+<FilesMatch "^(db|cron|cron_handler)\.php$">
+    Require all denied
+</FilesMatch>
+# Operational notes and deployment manifests are not public site content.
+<FilesMatch "^(DESIGN|OPS\.md|continue\.md|manifest\.scm)$">
+    Require all denied
+</FilesMatch>
+# 2. Never serve the database or logs (v1 gap: only db.php was blocked)
+<FilesMatch "\.(db|db-journal|db-shm|db-wal|bak|log|lock)$">
+    Require all denied
+</FilesMatch>
+
+# 3. Optionally restrict the webhook to GitHub's hook ranges
+#    (get the current list from https://api.github.com/meta -> "hooks")
+#<Files "webhook.php">
+#    Require ip 140.82.112.0/20
+#    Require ip 185.199.108.0/22
+#    Require ip 192.30.252.0/22
+#    Require ip 143.55.64.0/20
+#</Files>
+
+# 4. Force HTTPS (better done in the vhost)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\. - [F,L]
+    RewriteCond %{HTTPS} !=on
+    RewriteRule ^ https://auth.friendly-machines.com%{REQUEST_URI} [R=301,L,NE]
+</IfModule>

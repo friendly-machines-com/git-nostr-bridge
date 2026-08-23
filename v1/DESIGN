@@ -1,0 +1,618 @@
+================================================================================
+ FRIENDLY MACHINES GITHUB <-> NOSTR BRIDGE
+ Current implementation contract
+================================================================================
+
+1. PURPOSE AND SCOPE
+--------------------------------------------------------------------------------
+
+The public client at https://friendly-machines.com/git/ is a standalone
+NostrGit client and Git repository browser. It reads and publishes NIP-34
+events directly through Nostr relays with a browser NIP-07 signer. A user does
+not need auth.friendly-machines.com to use it.
+
+The server in this directory additionally mirrors supported collaboration
+metadata between GitHub and Nostr:
+
+  Implemented in both directions:
+    - repository star/unstar               Nostr kind 7 / kind 5
+    - issue roots                         Nostr kind 1621
+    - issue discussion comments/replies  Nostr kind 1111 / NIP-22
+    - Open, Resolved, and Closed status   kinds 1630, 1631, 1632
+    - valid same-author deletion requests kind 5 / NIP-09
+
+  Accepted from Nostr but not mapped to a GitHub issue state:
+    - Draft status                        kind 1633
+
+  Not implemented by the server bridge:
+    - GitHub pull requests, review comments, or inline review comments
+    - Nostr patch, PR, or PR-update roots (1617, 1618, 1619)
+    - issue labels, Git tags, repository ref state, or releases
+    - Git repository object or ref synchronization
+
+The browser client supports Nostr-native patches, PRs, PR updates, repository
+announcements, and repository state separately. That does not imply that the
+GitHub bridge supports those types.
+
+The client retains its signature-verified event-ID map across reloads and
+merges later relay observations into it. Repository-announcement publication
+uses two default relays and attempts every configured relay. One acknowledgement
+is sufficient for an interactive publish to succeed; unavailable relays are
+reported to the user instead of making one failed relay block publication.
+The bridge independently banks an observed valid announcement.
+
+The bridge is a metadata bridge. It never clones a Git repository and never
+uses a local or remote Git checkout to decide issue/comment/status state.
+GitHub webhooks and REST objects contain the GitHub metadata; signed Nostr
+events contain the Nostr metadata.
+
+1.1 COLLECTION SEMANTICS
+--------------------------------------------------------------------------------
+
+An array on the wire is not automatically a list in the domain model. The
+implementation uses the following explicit collection algebra:
+
+Collection                         Semantic type and identity
+---------------------------------  ---------------------------------------------
+Signed event tags                  Ordered wire sequence. Exact outer and inner
+                                   order is part of the NIP-01 event ID and
+                                   signature and is never rewritten on receipt.
+
+relays/clone/web/maintainers       Sets of strings. Duplicate and input order
+tag values, p/t mentions,          have no meaning. Sets are sorted only for
+filter members, deletion targets   deterministic output, display, and resource
+                                   caps. Registration requires equality with
+                                   the complete announced relay set.
+
+d/name/description/subject/a/c,    Optional scalar fields. Identical duplicate
+branch-name/merge-base, r:euc,     tags collapse to one value. Distinct values
+K/k, E/e root/parent relations     are ambiguous and invalidate that use; no
+                                   first/last tag is selected.
+
+Relay event pool                   Map event-ID -> verified immutable event.
+                                   Relay responses and the browser's durable
+                                   local ledger merge; one response never
+                                   replaces the known map.
+
+Addressable event versions         Set reduced per (kind,pubkey,d) coordinate
+                                   by greatest created_at, then lowest event ID.
+
+NIP-22 comments                    Directed parent graph keyed by event ID.
+                                   E/K/P define the root and e/k/p the parent.
+                                   Reference edges establish causality;
+                                   timestamps order siblings for display only.
+
+NIP-34 patch messages              Directed reply graph keyed by event ID.
+                                   Marked e/reply edges establish series shape.
+                                   File order is used only when the client
+                                   creates a new causal patch chain.
+
+NIP-34 status events               Set of candidates per immutable root, reduced
+                                   after authorization by greatest created_at,
+                                   then lowest event ID.
+
+NIP-09 deletions                   Set of (deletion ID,target ID) relations plus
+                                   durable tombstones. Target arrival order has
+                                   no effect; deletion-of-deletion has no effect.
+
+Repository announcements          Durable replacement head plus an independent
+and address deletions              same-author kind-5/k=30617 cutoff. Empty
+                                   relay results are not set subtraction.
+
+NIP-34 repository state            Map fully-qualified ref-name -> commit ID,
+                                   plus an optional single HEAD symbolic ref.
+                                   A 30618 publication is one complete snapshot,
+                                   not an ordered stream of per-ref changes.
+
+Repository/NIP-46 relay values     Sets of alternative endpoints. NIP-46
+                                   switch_relays replaces the connection set;
+                                   it is not a preference list. Fan-out limits
+                                   are applied after deduplication and sorting.
+
+GitHub installations/repos/users   Maps keyed by GitHub's stable numeric IDs;
+                                   active repository name is also unique.
+                                   Complete API reconciliation, not webhook
+                                   array or arrival order, determines membership.
+
+event_map and identity links       One-to-one maps in both directions, enforced
+                                   by unique database indexes.
+
+Queue rows                         Durable scheduled work records. run_at then
+                                   row ID is only claim order; correctness and
+                                   final state may not depend on execution order.
+                                   dedupe_key identifies equivalent pending work.
+
+Repository stars                   State map keyed by stable GitHub repository
+                                   ID + GitHub user ID. GitHub webhooks are
+                                   wake-up signals; current API state is
+                                   authoritative. Nostr stars are independently
+                                   signed kind-7 events; same-author kind-5
+                                   relations tombstone them.
+
+projects.list                      A true ordered presentation list. Duplicate
+                                   repository identifiers are invalid.
+
+Git commit history / tag-object    True causal sequences. Git tree entries,
+chains / newly created patch set   branches, and tags are keyed collections and
+                                   are sorted only for deterministic presentation.
+
+The decisive rule is that sorting a set creates a canonical representation,
+not precedence or causality. A reducer or graph edge is required whenever one
+member can affect another.
+
+2. OPTIONAL USER AUTHENTICATION
+--------------------------------------------------------------------------------
+
+The GitHub App installation is server infrastructure, not a user login.
+Every bridged GitHub repository must have an active, API-reconciled GitHub App
+installation. That installation supplies the always-on GitHub identity needed
+when no user has linked an account.
+
+User setup                    Standalone client       GitHub -> Nostr
+----------------------------  ----------------------  -------------------------
+No auth                       Direct NIP-07 posting   Bridge key + gh_user tag
+GitHub App user auth only     Direct NIP-07 posting   Bridge key + gh_user tag
+GitHub + Nostr linked         Direct NIP-07 posting   User's NIP-46 signer
+Nostr link only               Direct NIP-07 posting   Bridge key + gh_user tag
+
+User setup                    Nostr -> GitHub
+----------------------------  -------------------------------------------------
+No auth                       App installation + visible npub/event attribution
+GitHub App user auth only     App installation; an unrelated browser Nostr
+                              identity is not guessed
+GitHub + Nostr linked         User's expiring GitHub App authorization when it
+                              can write the repository; App fallback otherwise
+Nostr link only               App installation + visible npub/event attribution
+
+Thus auth.friendly-machines.com is optional for users in two independent
+senses:
+
+  - the standalone Nostr client signs directly with NIP-07;
+  - the bridge crosses unlinked authors through its labelled bridge/App
+    identities rather than rejecting their content.
+
+Linking only upgrades attribution. It is never an intake gate.
+
+Browser sessions are disposable views of durable identity state. Clearing a
+cookie never removes or recreates a GitHub/Nostr link. The account page first
+uses its HttpOnly session cookie; when that cookie is absent, "Sign in with
+Nostr" uses a one-time, non-published NIP-07 signature to prove the existing
+pubkey and issue a fresh cookie. That sign-in transition updates only
+oauth_states. It never writes links or nostr_accounts. An unlinked signer is
+reported as unlinked and cannot create an identity association through the
+sign-in endpoint.
+
+Connecting a remote NIP-46 signer is a separate operation. Repeating its proof
+for an already-linked pubkey may restore a browser session, but preserves the
+stored bunker and client key. Those credentials change only through the
+explicit "Replace remote signer connection" action, and the replacement signer
+must prove the exact existing pubkey.
+
+One GitHub limitation is intrinsic to repository stars: installation tokens
+are not user identities and GitHub's star/unstar endpoints accept GitHub App
+user tokens, not installation tokens. GitHub -> Nostr stars retain the normal
+bridge-key fallback for unlinked GitHub users. A Nostr -> GitHub star remains
+durable until that Nostr author links a GitHub user with Starring permission;
+the bridge never pretends that the App installation starred it.
+
+3. FIXED SERVER CONFIGURATION CONTRACT
+--------------------------------------------------------------------------------
+
+The runtime uses exactly:
+
+  /home/dh_4nnf3n/secrets
+
+This is a literal deployment path because mod_fcgid does not provide HOME.
+The runtime does not walk parent directories, inspect document-root values,
+scan filenames, inspect token formats, use home-directory markers, or look
+for renamed/older secret files.
+
+Required files:
+
+  github-webhook.php            returns the GitHub App webhook secret string
+  github-app.php                returns:
+                                  [
+                                    "client_id" => "...",
+                                    "client_secret" => "..."
+                                  ]
+  github-app-private-key.pem    the App's generated RSA private key
+  repo-registration.php        repository-registration shared secret string
+  db-crypt.php                  64 lowercase/uppercase hex characters
+  bridge-key.php                64-hex Nostr bridge private key
+
+The secrets directory must be owned by the server account with mode 0700.
+Every secret file must be owned by that account, must not be a symlink, and
+must have mode 0600.
+
+There is one GitHub App. It supplies both:
+
+  - installation tokens, minted automatically for always-on repository work;
+  - optional expiring user tokens and refresh tokens for personal attribution.
+
+There is no standalone OAuth App path and no static access-token file.
+
+4. REPOSITORY AUTHORITY
+--------------------------------------------------------------------------------
+
+GitHub authority has two independent requirements:
+
+  1. An active GitHub App installation contains the exact repository.
+     Webhook payloads may bank an unknown installation/repository, but it is
+     not usable until REST reconciliation has succeeded and minted a token.
+     Delayed webhook payloads cannot reactivate a removed repository or
+     deleted/suspended installation. There is no separate account-authority
+     cache: the current installation and exact repository row are authority.
+     Hourly complete App-installation discovery bootstraps or repairs state
+     even if the installation webhook itself was missed.
+
+  2. repos.php contains an operator-authenticated mapping from the GitHub
+     full name to an exact signed NIP-34 30617 address and relay set.
+
+Registration verifies the newest addressable 30617 across every configured
+relay and banks the complete signed event in the durable repository-
+announcement ledger. Newest means greatest created_at; the lowest event ID
+wins an exact timestamp tie. The registered relay set must equal the complete
+relay set in the winning event's relays tags.
+
+Relay polling retains 30617 replacements and same-author kind-5 address
+deletions as two independent input sets. Their reducer is arrival-order
+independent: a deletion suppresses announcements at or before its created_at,
+while a later replacement restores the address. Under NIP-09 every a tag is a
+deletion target, never repository context. Content and star deletions therefore
+emit only exact e targets and must not copy the repository a tag. An empty
+EOSE, incomplete query, relay failure, or process restart never erases the
+banked announcement.
+
+The 30617 publisher is implicitly a maintainer unless the announcement has a
+u tag. It does not list itself in maintainers. bridge_authorized records only
+whether the separate bridge key may author a status for someone else's root;
+ordinary issue/comment crossing does not depend on it. Relay unavailability
+is not interpreted as bridge_authorized=false.
+
+Every crossing reloads the reduced durable mapping and its banked 30617;
+relay I/O is not part of the crossing transaction. Queued payload snapshots
+are not authority after a replacement or deletion is reduced. There is no
+name-derived repository fallback.
+
+5. GITHUB -> NOSTR
+--------------------------------------------------------------------------------
+
+github/webhook.php:
+
+  1. accepts POST only and caps the body;
+  2. verifies X-Hub-Signature-256 with github-webhook.php;
+  3. ignores deliveries without a GitHub App installation, except the App
+     user-authorization revocation event;
+  4. durably enqueues the complete authenticated delivery;
+  5. returns 202 without doing relay I/O.
+
+Cron consumes the raw delivery. Unready repository/App state raises a
+dependency deferral; it does not consume the failed-execution budget.
+
+Issue opened:
+
+  - creates a regular kind 1621 event with a, p, subject, gh, and gh-N tags;
+  - uses the GitHub source created_at, never the queue time;
+  - an active GitHub/Nostr link fixes the signer to that user's NIP-46 key;
+  - temporary signer failure leaves the durable job pending and can never
+    produce an immutable bridge-signed substitute;
+  - no active link: bridge signature plus gh_user attribution.
+
+Issue title/body edited:
+
+  Kind 1621 is a regular immutable event. NIP-34 defines no interoperable
+  issue-edit event. Replacing the root would create a different identity and
+  disconnect existing comments/status references. The bridge therefore emits
+  a kind 1111 NIP-22 correction notice on the original root containing the
+  changed title/body. It does not pretend that the original event mutated.
+
+Comment created:
+
+  - creates kind 1111;
+  - E/K/P identify the immutable issue root;
+  - e/k/p identify the parent;
+  - GitHub issue comments are flat, so a GitHub-created comment is top-level.
+
+Comment edited:
+
+  NIP-22 comments are regular immutable events. The edit becomes another
+  attributed kind 1111 notice on the original root.
+
+Repository star/unstar:
+
+  The GitHub `star` webhook is only a wake-up signal. The worker queries the
+  current starred-repository collection of the webhook's actor and matches by
+  stable numeric repository/user IDs. Current starred state creates one
+  NIP-25 kind-7 `⭐` reaction carrying e, a, p, and k=30617 references to the
+  verified repository announcement. Current unstarred state publishes a
+  same-author kind-5 deletion for every still active reaction belonging to
+  that logical GitHub pair.
+
+  GitHub restricted `/repos/{owner}/{repo}/stargazers` to repository admins
+  and collaborators in July 2026. An App installation is a separate
+  authorization relationship, not a collaborator role. Consequently, signed
+  Star webhooks establish new stable actor/repository pairs in a
+  primary-keyed SQLite set; hourly reduction combines those pairs with mapped
+  reactions and rechecks each pair independently. A webhook GitHub never
+  delivers for a previously unknown actor cannot be reconstructed from the
+  restricted repository-wide API. Received webhooks are durably banked before
+  HTTP 202, and no arrival ordering is assumed.
+
+  The `watch` webhook is not used. It is a legacy/incomplete star-added signal
+  and has no removal action.
+
+Open/close:
+
+  - reopened                         kind 1630 Open
+  - closed, state_reason=completed   kind 1631 Resolved
+  - other closed                     kind 1632 Closed
+
+NIP-34 permits a status only from the root author or a repository maintainer.
+The bridge key signs when it authored the root or is currently a maintainer.
+Otherwise the linked root signer must sign; the bridge does not forge an
+unauthorized status.
+
+GitHub source deletion:
+
+  If the target was originally mirrored from GitHub, the bridge publishes a
+  same-signer kind 5 request, stores both the event crossing and deletion
+  relationship, and can repair the relationship after a
+  publish-before-ledger crash without republishing.
+
+  If GitHub deletes its mirror of an independently authored Nostr root, the
+  bridge does not delete the Nostr source. It records that the GitHub mirror is
+  gone so later out-of-order dependants do not retry an impossible crossing.
+
+6. NOSTR -> GITHUB
+--------------------------------------------------------------------------------
+
+Cron collects every in-scope, correctly signed event, regardless of whether
+its author linked an identity. Authentication selects the GitHub author; it
+does not select which events may cross.
+
+Issue:
+
+  A signed kind 1621 whose a/p tags match a verified repository creates a
+  GitHub issue. An unlinked author is visibly attributed by npub and Nostr
+  event ID in the body and the App installation performs the write.
+
+Comment:
+
+  The E/K/P root and e/k/p parent references must be complete and must match
+  the actual stored authors and kinds. A nested parent must belong to the same
+  root. The GitHub comment is posted to the issue after the complete chain is
+  available. GitHub displays it flat; event_map retains the Nostr parent ID.
+
+Status:
+
+  The author must be the root author, the repository publisher (when implicit
+  maintainer), or a maintainer in the current winning 30617. The status must
+  also carry p tags for both the repository publisher and root author.
+
+  - 1630 -> GitHub open/reopened
+  - 1631 -> GitHub closed/completed
+  - 1632 -> GitHub closed/not_planned
+  - 1633 -> stored as the valid Nostr status head; no fake GitHub state
+
+The valid Nostr head is greatest created_at, then lowest event ID. An older
+event arriving later is stored but cannot overwrite newer GitHub state.
+
+Repository star:
+
+  A signed kind-7 reaction whose content is exactly `⭐` and whose unambiguous
+  e/a/p/k tags identify a verified kind-30617 repository is a star. The
+  corresponding linked GitHub App user token calls GitHub's authenticated-user
+  star endpoint. A same-author kind-5 e-target removes it. If the author has
+  not linked GitHub, the star and any later deletion remain durable pending
+  work; an installation token cannot impersonate a GitHub user.
+
+  The client publishes a distinct reaction rather than rewriting the user's
+  NIP-51 kind-10018 global followed-repositories list. That avoids losing
+  unrelated list entries during concurrent client updates.
+
+Deletion:
+
+  A kind 5 e-target is effective only when its author equals the actual target
+  author. Deleting a deletion request has no effect.
+
+  - mapped GitHub comments are deleted through the REST comment DELETE API;
+  - GitHub has no general REST issue deletion operation, so an issue becomes a
+    clearly labelled, closed tombstone;
+  - deleting the current status reveals the next valid status (or default
+    Open) and applies it when GitHub can represent it;
+  - a Nostr root deletion is permanent locally; later GitHub edits/reopens are
+    restored to the tombstone.
+
+7. DISTRIBUTED ORDERING AND CONVERGENCE
+--------------------------------------------------------------------------------
+
+Neither GitHub webhook delivery nor relay delivery is causal order.
+created_at orders replacement/status winners and siblings; it does not prove
+parent-before-child arrival.
+
+The bridge therefore:
+
+  - stores the authenticated raw GitHub delivery before acknowledging it;
+  - reconstructs/queues a GitHub root from comment, edit, status, or deletion
+    payloads when Opened was delayed or absent;
+  - records a discovered Nostr root synchronously before dependent execution;
+  - queues comments/statuses/deletions by immutable target ID even when their
+    dependency is absent;
+  - defers unresolved dependencies without increasing fails;
+  - runs root-specific historical scans for E-rooted comments, e-rooted
+    statuses, and e-targeted deletions;
+  - keeps separate resumable relay cursors and performs hourly full sweeps so
+    an event published late with an old created_at is still found;
+  - verifies every relay result against the exact local filter before it can
+    move a cursor;
+  - merges relay results by event ID and reduces statuses/replacements
+    deterministically;
+  - banks verified 30617 heads and their k=30617 address deletions as
+    independent durable sets; an empty EOSE cannot unverify a repository;
+  - treats deletion requests as durable tombstones and reapplies them after a
+    late target appears;
+  - treats each GitHub star delivery as a reconciliation trigger, queries
+    current GitHub state, and assigns monotonically increasing logical Nostr
+    seconds when separate star generations share one GitHub timestamp;
+  - retains pending unlinked Nostr star IDs in deletion polling, so an unstar
+    can arrive before the star crosses or long before the author links GitHub.
+
+Nostr filters have no standard offset or event-ID tie cursor. If a relay caps
+one exact filter at more events sharing one created_at second than its limit,
+no generic client can prove it retrieved the omitted same-timestamp events.
+Root-specific backfills, separate filters, a 5000-event browser limit, hourly
+server sweeps, and repeated relay queries reduce this risk but cannot change
+that protocol/relay limitation.
+
+8. IDEMPOTENCE AND CRASH WINDOWS
+--------------------------------------------------------------------------------
+
+event_map is unique in both GitHub ID and Nostr ID directions.
+
+GitHub -> Nostr:
+
+  The unsigned event is deterministic from the durable job. Before signing or
+  publishing, the worker asks the configured relays for the exact expected
+  event ID. If publication succeeded before SQLite committed, the worker
+  verifies the full recovered event and records it without republishing. A
+  linked author has exactly one deterministic signer identity: the user's key.
+  Relay recovery therefore checks only that user-signed form.
+
+Nostr -> GitHub:
+
+  Created issues/comments carry an HMAC-authenticated hidden marker derived
+  from db-crypt.php and the Nostr event ID. The durable queue timestamp bounds
+  paginated reconciliation and excludes objects created before the job.
+  Recovery accepts one unique eligible object from the complete bounded result
+  set; it never selects an event-map identity by mutable updated_at, integer
+  timestamp, or numeric ID. A user cannot forge a marker before the bridge
+  publishes it. If a now-public valid marker appears on multiple eligible
+  objects, the job defers for explicit resolution rather than guessing which
+  object is the crossing.
+
+Only the original durable crossing job may create its ledger row. A signed
+proxy tag is a loop-kill/origin claim, not permission to invent a mapping.
+
+Transient GitHub/relay failures remain pending with capped backoff. Immutable
+invalid inputs complete as explicit permanent skips. Repeated logic/config
+failures become inspectable dead jobs after eight failed executions.
+Automatic redelivery/full scans do not create a fresh failure budget for the
+same immutable input; operator repair is explicit.
+
+9. DATABASE CONTRACT
+--------------------------------------------------------------------------------
+
+SQLite uses WAL, foreign keys, busy_timeout, an adjacent cron flock, and mode
+0600 for the database, WAL/SHM, lock, and logs.
+
+An empty database initializes directly to schema version 6 and its exact
+schema-contract marker. A non-empty database must already satisfy that
+contract and the required table/column/foreign-key shape. Runtime performs no
+incremental, additive, or compatibility migration and never searches for old
+credentials.
+
+Important roles:
+
+  github_installations / github_installation_repositories
+      authoritative App access and encrypted cached installation token
+
+  github_accounts / nostr_accounts / links
+      optional one-to-one identities and encrypted user authorization/bunker
+
+  repos
+      immutable one-to-one mapping between an exact GitHub full name and an
+      exact verified (publisher pubkey, 30617 d identifier) address
+
+  jobs
+      durable raw deliveries, crossings, dependency work, and backfills
+
+  event_map
+      completed bidirectional crossings and immutable parent/root metadata
+
+  nostr_roots
+      roots known before, during, or after their GitHub crossing
+
+  deletion_map
+      durable, authorized deletion event -> target relationships
+
+  poll_cursor
+      resumable per-relay, per-filter scans
+
+10. SECURITY BOUNDARIES
+--------------------------------------------------------------------------------
+
+  - webhook input is HMAC-authenticated before logging/queuing;
+  - every Nostr event ID/signature and exact subscription match is verified;
+  - p/P/t membership checks use only tag element 1; a relay-hint or extension
+    slot cannot impersonate an expected pubkey or label;
+  - scalar fields and root/parent relations reject conflicting values rather
+    than selecting by tag order;
+  - OAuth state is single-use, server-side, cookie-bound, and uses PKCE;
+  - linking status is available only to a browser holding its unguessable
+    HttpOnly session cookie or completing a signed, single-use NIP-07 recovery
+    challenge; a claimed pubkey alone cannot query GitHub links;
+  - NIP-07 sign-in consumes an empty oauth_states row through a five-minute
+    signed challenge,
+    exposes only a server-keyed HMAC rather than the HttpOnly cookie value,
+    and never creates a link or replaces NIP-46 credentials;
+  - ordinary repeated NIP-46 proof preserves existing signer credentials;
+    only an explicit cookie-bound replacement request may rotate them, and
+    only after the new signer proves the exact existing pubkey;
+  - plain Nostr-link page GET is read-only; an explicit start POST allocates
+    the browser session and per-link keypair, while approval listener/intake
+    mutations are POST-only;
+  - GitHub authorization initiation is POST-only; the externally mandated
+    OAuth callback remains a single-use, PKCE-protected GET bound to that
+    browser session;
+  - signer authorization challenges expose only validated HTTPS URLs to that
+    same cookie-bound browser, while the original NIP-46 request ID remains
+    subscribed for the eventual response;
+  - stable GitHub numeric user IDs prevent login rename/reuse from moving a
+    Nostr link to another account;
+  - user and installation tokens, bunker URIs, and per-link NIP-46 client keys
+    are encrypted at rest;
+  - NIP-46 completion stores the signer's current relay set as required by
+    switch_relays, after a four-endpoint cap, strict wss URL validation, and
+    public-address-only, single-resolution WebSocket connection checks that
+    prevent private-network and DNS-rebinding SSRF;
+  - cron keeps all advertised NIP-46 response subscriptions open past EOSE
+    during each scan, because kind 24133 approval responses are ephemeral;
+  - get_public_key is accepted only after the signer returns a valid signature
+    under that claimed user key for an exact, non-published link challenge;
+  - the bridge never receives a user's Nostr private key;
+  - GitHub user-token failure falls back to the App instead of dropping work;
+  - NIP-46 signer failure falls back only for ordinary issue/comment content,
+    never where NIP-34/NIP-09 requires the original/authorized signer;
+  - database/log/include/test paths are denied by .htaccess;
+  - cron.php is CLI-only;
+  - user content is escaped in the browser client and server HTML;
+  - public HTTP failures do not expose secret filesystem paths.
+
+11. CLIENT CONTRACT
+--------------------------------------------------------------------------------
+
+client/index.html is deployable at any directory containing projects.list and
+the listed Git repositories. Repository URLs are relative to that deployed
+file; it has no dependency on /git/, /auth/, or auth.friendly-machines.com.
+
+Its Nostr event reducer, comment tree, patch graph, PR/patch relationship,
+replacement, status, deletion, and route behavior are documented in
+client/README.md.
+
+The client currently loads pinned, SRI-checked browser Git/Nostr libraries
+from CDNs. This is a deployment dependency, not a GitHub dependency and not
+server bridge authority. Self-hosting those exact assets would remove the CDN
+availability dependency, but no asset is downloaded or executed by the server.
+
+12. PROTOCOL REFERENCES
+--------------------------------------------------------------------------------
+
+  NIP-01  event verification, filters, addressable replacement ordering
+  NIP-09  same-author deletion requests and permanent deletion semantics
+  NIP-22  kind 1111 uppercase root and lowercase parent references
+  NIP-34  repositories, issues, patches, PRs, updates, and four statuses
+  NIP-44  encryption for NIP-46 kind 24133 messages
+  NIP-46  durable remote signing via nostrconnect
+  BIP-340 Schnorr signatures
+
+================================================================================

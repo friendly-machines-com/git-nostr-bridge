@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Bridge for Nostr and GitHub</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:44em;margin:3rem auto;padding:0 1rem;line-height:1.55;color:#1a1a1a}
+hr{border:0;border-top:1px solid #ddd;margin:2.5rem 0}
+.btn{display:inline-block;margin:.4rem .8rem 0 0;padding:.65rem 1.3rem;border-radius:8px;
+     color:#fff;text-decoration:none;font-weight:600;border:0;cursor:pointer;font-size:1rem}
+.gh{background:#24292f}.no{background:#8b5cf6}.ghost{background:#666}
+.link-form{display:inline}
+ol{padding-left:1.2em}li{margin:.6em 0}
+small{color:#666}
+#statusbox{margin-top:1rem;padding:.8rem 1rem;border-radius:8px;background:#f6f6f8;display:none}
+#statusbox.show{display:block}
+.ok{color:#0a7d28;font-weight:600}.todo{color:#b06000;font-weight:600}
+.signin{margin-top:.9rem}.signin small{display:block;margin-top:.35rem}
+.error{color:#b00020;margin-top:.6rem}
+code{background:#f0f0f2;padding:.1em .35em;border-radius:4px;font-size:.9em;word-break:break-all}
+</style>
+</head>
+<body>
+<h1>Bridge between Nostr and GitHub</h1>
+<h2>Optional identity linking</h2>
+<p>This is the optional identity-linking page for the bidirectional bridge
+between <a href="https://friendly-machines.com/git/">NostrGit</a> and its
+github.com mirror.</p>
+<p><strong>The bridge itself does not require you to authenticate.</strong>
+Issues, comments, status changes, and deletions cross in both directions regardless:
+unlinked GitHub authors are represented on Nostr by the clearly labelled
+bridge key, and unlinked Nostr authors are represented on GitHub by the
+organization bridge account with their Nostr author and event attributed.</p>
+<p>Linking both identities only upgrades those proxy crossings: GitHub activity
+can be signed by your own Nostr signer, and Nostr activity can be posted using
+your own GitHub App user authorization. Standalone NostrGit posting continues to use
+nos2x (or another NIP-07 signer) directly.</p>
+<p><small>Repository Stars are the one GitHub identity exception. GitHub only
+allows a user—not an App installation—to star a repository. A Nostr Star
+therefore reaches GitHub only when that exact Nostr author has linked a GitHub
+user; the Nostr Star itself never depends on this site.</small></p>
+
+<hr>
+
+<h2 id="link-section" style="display:none">Sign in or connect identities</h2>
+<div id="link-body" style="display:none">
+<ol>
+<li><form class="link-form" method="post" action="/v1/github/login">
+    <button class="btn gh" type="submit">Sign in with GitHub</button></form><br>
+    <small>Authorizes the GitHub App as your user. If this identity was
+    previously linked, the page displays that existing link; it does not
+    create a second one.</small></li>
+<li><a class="btn no" href="/v1/nostr-link.php">Connect a remote Nostr signer</a><br>
+    <small>Creates the bridge’s durable signer connection for a new Nostr
+    identity. Repeating this after clearing cookies signs this browser back in;
+    it does not replace an existing signer connection.</small></li>
+</ol>
+<p><small>Either order works. Both steps together (give us a minute) upgrade bridge
+attribution to your native identities. Skipping either or both never stops
+content from crossing.</small></p>
+</div>
+
+<div id="statusbox"></div>
+<p><button class="btn ghost" id="check">Refresh status</button></p>
+<p id="why" style="display:none"><small>Why link both? Nostr side: your GitHub
+issues and comments get <em>your</em> cryptographic signature instead of the
+labelled bridge signature. GitHub side: your Nostr issues and replies use your
+GitHub account instead of the attributed organization bridge account. Both
+verified halves are required only to join the identities, never to bridge the
+content.</small></p>
+
+<script>
+(async () => {
+  const box = document.getElementById('statusbox');
+  const linkSection = document.getElementById('link-section');
+  const linkBody = document.getElementById('link-body');
+  const HEX64 = /^[0-9a-f]{64}$/;
+  const show = (html) => { box.className = 'show'; box.innerHTML = html; };
+  const showLinkActions = (visible) => {
+    linkSection.style.display = visible ? '' : 'none';
+    linkBody.style.display = visible ? '' : 'none';
+  };
+
+  const postStatus = async (body) => {
+    const response = await fetch('/v1/status.php', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    let result;
+    try {
+      result = await response.json();
+    } catch (_) {
+      throw new Error('The bridge returned an invalid response.');
+    }
+    if (!response.ok) {
+      throw new Error(result.error || ('The bridge returned HTTP ' + response.status + '.'));
+    }
+    return result;
+  };
+
+  const signInWithNostr = async (button) => {
+    const error = document.getElementById('nostr-signin-error');
+    if (!window.nostr
+        || typeof window.nostr.getPublicKey !== 'function'
+        || typeof window.nostr.signEvent !== 'function') {
+      throw new Error('No Nostr browser signer was found. Install or enable nos2x, then try again.');
+    }
+    button.disabled = true;
+    button.textContent = 'Waiting for nos2x…';
+    if (error) error.textContent = '';
+    try {
+      const issued = await postStatus({action: 'challenge'});
+      const requested = issued.challenge;
+      if (!requested
+          || requested.kind !== 27235
+          || !Number.isInteger(requested.created_at)
+          || !Array.isArray(requested.tags)
+          || requested.content !== '') {
+        throw new Error('The bridge returned an invalid signing request.');
+      }
+      const pubkey = String(await window.nostr.getPublicKey()).toLowerCase();
+      if (!HEX64.test(pubkey)) {
+        throw new Error('The Nostr signer returned an invalid public key.');
+      }
+      const signed = await window.nostr.signEvent(requested);
+      if (!signed
+          || String(signed.pubkey || '').toLowerCase() !== pubkey
+          || signed.kind !== requested.kind
+          || signed.created_at !== requested.created_at
+          || signed.content !== requested.content
+          || JSON.stringify(signed.tags) !== JSON.stringify(requested.tags)) {
+        throw new Error('The Nostr signer changed the verification request.');
+      }
+      const recovered = await postStatus({action: 'recover', event: signed});
+      if (!recovered.identity_recognized) {
+        throw new Error('The signer was verified, but no existing link was found.');
+      }
+      render(recovered);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Sign in with Nostr';
+    }
+  };
+
+  const bindNostrSignIn = () => {
+    const button = document.getElementById('nostr-signin');
+    if (!button) return;
+    button.onclick = async () => {
+      const error = document.getElementById('nostr-signin-error');
+      try {
+        await signInWithNostr(button);
+      } catch (failure) {
+        if (error) error.textContent = failure.message;
+      }
+    };
+  };
+
+  const render = (r) => {
+    if (r.fully_linked) {
+      show('✅ Fully bridged: GitHub <strong>@' + r.github.login + '</strong> ↔ nostr <code>' +
+           (r.nostr.npub || '').slice(0, 20) + '…</code>. Nothing more to do.');
+      showLinkActions(false);
+      return;
+    }
+    if (r.github && r.nostr === null) {
+      show('GitHub linked as <strong>@' + r.github.login + '</strong> — one step left: ' +
+           '<a href="/v1/nostr-link.php">link your Nostr signer</a>.');
+    } else if (r.nostr && r.github === null) {
+      show('Nostr identified as <code>' + r.nostr.npub + '</code>. ' +
+           'Use the GitHub button below to identify that side.');
+    } else {
+      show('<strong>You are not signed in on this browser.</strong> ' +
+           'Any existing bridge link is unchanged. Sign in to display it here.' +
+           '<div class="signin"><button class="btn no" id="nostr-signin" type="button">' +
+           'Sign in with Nostr</button>' +
+           '<small>Uses a browser signer such as nos2x to sign one private verification ' +
+           'request. Nothing is published.</small>' +
+           '<div class="error" id="nostr-signin-error" role="alert"></div></div>');
+      bindNostrSignIn();
+    }
+    showLinkActions(true);
+  };
+  const fetchStatus = async () => {
+    const resp = await fetch('/v1/status.php?fresh=' + Date.now(), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {'Cache-Control': 'no-cache'}
+    });
+    if (!resp.ok) throw new Error('status.php HTTP ' + resp.status);
+    const r = await resp.json();
+    if (!r || typeof r.fully_linked === 'undefined') throw new Error('bad JSON from status.php');
+    return r;
+  };
+  try {
+    render(await fetchStatus());
+  } catch (e) { console.warn('status check failed:', e); }
+  document.getElementById('check').onclick = async (ev) => {
+    const btn = ev.currentTarget;
+    const old = btn.textContent;
+    btn.textContent = 'Checking…';
+    btn.disabled = true;
+    try {
+      render(await fetchStatus());
+      box.insertAdjacentHTML(
+        'beforeend',
+        '<br><small>Checked at ' + new Date().toLocaleTimeString() + '</small>'
+      );
+      btn.textContent = 'Checked ✓';
+    } catch (e) {
+      show('Could not check status: ' + e.message);
+      alert('Status check failed: ' + e.message +
+            '\n\nCheck: (1) you are on https://, (2) /v1/status.php is reachable.');
+      btn.textContent = old;
+    } finally {
+      btn.disabled = false;
+    }
+    setTimeout(() => { btn.textContent = old; }, 4000);
+  };
+  document.getElementById('why').style.display = '';
+})();
+</script>
+</body>
+</html>

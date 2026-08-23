@@ -1,0 +1,21 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# 1. Allow direct access to .well-known and existing files
+#RewriteCond %{REQUEST_FILENAME} -f [OR]
+#RewriteCond %{REQUEST_FILENAME} -d
+#RewriteRule ^ - [L]
+
+# 2. Clean URLs for v1 GitHub endpoints (omit .php extension in URLs)
+RewriteRule ^login$ login.php [L,QSA]
+RewriteRule ^callback$ callback.php [L,QSA]
+RewriteRule ^webhook$ webhook.php [L,QSA]
+</IfModule>
+
+# 3. Defense in depth; the parent v1 rules deny these too.
+<FilesMatch "\.(db|db-journal|db-shm|db-wal|bak|log|lock)$">
+    Require all denied
+</FilesMatch>
+<Files "db.php">
+    Require all denied
+</Files>
