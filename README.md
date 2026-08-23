@@ -73,6 +73,20 @@ RewriteRule ^([^/]+\.git)$ git.cgi/$1/ [L,QSA]
 
 This makes the git service much faster.
 
+## Extra identification of Nostr GitHub user link in NostrGit
+
+If you want, you can post a GitHub gist (as the GitHub user--while signed into GitHub with that user) with your Nostr npub key. That would allow NostrGit to show a hint that it actually knows you to be GitHub user xyz even for Nostr-posted issues.
+
+This project has a flow for that, under the main page under "Show your GitHub account on Nostr" .
+
+The gist should be on [GitHub gist](https://gist.github.com/) as nostr.txt , and say:
+
+```
+Verifying that I control the following Nostr public key: npubxxx
+```
+
+Then publish it on Nostr using the button.
+
 # Extra info: Repository mirroring
 
 ## Automatically git push to two destinations
