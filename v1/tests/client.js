@@ -11,6 +11,21 @@ const html = fs.readFileSync(
   path.join(__dirname, "..", "client", "index.html"),
   "utf8"
 );
+assert.match(
+  html,
+  /<meta\s+name="color-scheme"\s+content="light dark"\s*\/>/,
+  "client must advertise both supported color schemes"
+);
+assert.match(
+  html,
+  /:root\s*\{[\s\S]*?color-scheme:\s*light dark;/,
+  "browser-provided controls must follow the selected color scheme"
+);
+assert.match(
+  html,
+  /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{/,
+  "client must honor the browser or operating-system dark-mode preference"
+);
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
   .filter(match => !/\bsrc\s*=/.test(match[1]));
 assert.equal(scripts.length, 1, "expected one inline client script");

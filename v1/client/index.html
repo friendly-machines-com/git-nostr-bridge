@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>NostrGit - Code Browser</title>
 
 <!-- if they don't have (or CANNOT have) the browser extension, uses WebAuthn or similar to provide Nostr signing. Private key still stays on user's device. -->
 <!--
 <script src="https://unpkg.com/nostr-login@latest/dist/unpkg.js"
-  data-perms="sign_event:1111,sign_event:1617,sign_event:1618,sign_event:1619,sign_event:1621,sign_event:1630,sign_event:1631,sign_event:1632,sign_event:1633,sign_event:30617,sign_event:30618"
-  data-theme="dark">
+  data-perms="sign_event:1111,sign_event:1617,sign_event:1618,sign_event:1619,sign_event:1621,sign_event:1630,sign_event:1631,sign_event:1632,sign_event:1633,sign_event:30617,sign_event:30618">
 </script>
 -->
 
@@ -29,19 +29,80 @@
 
   <style>
     :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --text-muted: #8b949e;
-      --accent: #8957e5;
-      --accent-hover: #a371f7;
-      --btn-bg: #21262d;
-      --btn-hover: #30363d;
-      --green: #238636;
-      --green-hover: #2ea043;
-      --blue: #58a6ff;
-      --red: #da3633;
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --card-bg: #f6f8fa;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --text-muted: #59636e;
+      --accent: #6639ba;
+      --accent-hover: #5936a2;
+      --btn-bg: #f6f8fa;
+      --btn-hover: #eaeef2;
+      --green: #1a7f37;
+      --green-hover: #116329;
+      --blue: #0969da;
+      --red: #cf222e;
+      --on-emphasis: #ffffff;
+      --heading: #1f2328;
+      --user-badge-bg: #f4f0ff;
+      --surface-raised: #eef1f4;
+      --surface-hover: #eaeef2;
+      --code-bg: #f6f8fa;
+      --code-text: #1f2328;
+      --thread-bg: #f8f5ff;
+      --thread-border: #8250df;
+      --thread-text: #6639ba;
+      --badge-purple-bg: #f4f0ff;
+      --badge-purple-text: #6639ba;
+      --badge-green-bg: #dafbe1;
+      --badge-green-text: #116329;
+      --badge-blue-bg: #ddf4ff;
+      --badge-blue-text: #0550ae;
+      --badge-red-bg: #ffebe9;
+      --badge-red-text: #a40e26;
+      --modal-overlay: rgba(31, 35, 40, 0.45);
+      --warning: #9a6700;
+      --success-text: #116329;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --card-bg: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --text-muted: #8b949e;
+        --accent: #8957e5;
+        --accent-hover: #a371f7;
+        --btn-bg: #21262d;
+        --btn-hover: #30363d;
+        --green: #238636;
+        --green-hover: #2ea043;
+        --blue: #58a6ff;
+        --red: #da3633;
+        --on-emphasis: #ffffff;
+        --heading: #ffffff;
+        --user-badge-bg: #1f1f2e;
+        --surface-raised: #1c2128;
+        --surface-hover: #1c2128;
+        --code-bg: #0d1117;
+        --code-text: #e6edf3;
+        --thread-bg: #111827;
+        --thread-border: #4f3b78;
+        --thread-text: #d2a8ff;
+        --badge-purple-bg: #3d1f5e;
+        --badge-purple-text: #d2a8ff;
+        --badge-green-bg: #1c3d24;
+        --badge-green-text: #7ee787;
+        --badge-blue-bg: #112d4e;
+        --badge-blue-text: #79c0ff;
+        --badge-red-bg: #491b1b;
+        --badge-red-text: #ff7b72;
+        --modal-overlay: rgba(0, 0, 0, 0.7);
+        --warning: #d29922;
+        --success-text: #7ee787;
+      }
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -62,12 +123,12 @@
       align-items: center;
     }
 
-    .brand { font-size: 1.25rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+    .brand { font-size: 1.25rem; font-weight: 700; color: var(--heading); display: flex; align-items: center; gap: 8px; text-decoration: none; }
     .brand span { color: var(--accent); }
 
     .nostr-user-badge {
       font-size: 0.85rem;
-      background: #1f1f2e;
+      background: var(--user-badge-bg);
       border: 1px solid var(--accent);
       padding: 4px 12px;
       border-radius: 20px;
@@ -93,9 +154,9 @@
       text-decoration: none;
     }
     .btn:hover { background: var(--btn-hover); }
-    .btn-primary { background: var(--accent); color: #fff; border-color: transparent; }
+    .btn-primary { background: var(--accent); color: var(--on-emphasis); border-color: transparent; }
     .btn-primary:hover { background: var(--accent-hover); }
-    .btn-green { background: var(--green); color: #fff; border-color: transparent; }
+    .btn-green { background: var(--green); color: var(--on-emphasis); border-color: transparent; }
     .btn-green:hover { background: var(--green-hover); }
     .btn-sm { padding: 3px 8px; font-size: 0.8rem; }
 
@@ -107,9 +168,9 @@
       border-radius: 12px;
       background: var(--border);
     }
-    .badge-purple { background: #3d1f5e; color: #d2a8ff; border: 1px solid var(--accent); }
-    .badge-green { background: #1c3d24; color: #7ee787; border: 1px solid var(--green); }
-    .badge-blue { background: #112d4e; color: #79c0ff; border: 1px solid var(--blue); }
+    .badge-purple { background: var(--badge-purple-bg); color: var(--badge-purple-text); border: 1px solid var(--accent); }
+    .badge-green { background: var(--badge-green-bg); color: var(--badge-green-text); border: 1px solid var(--green); }
+    .badge-blue { background: var(--badge-blue-bg); color: var(--badge-blue-text); border: 1px solid var(--blue); }
     .external-identity {
       color: var(--blue);
       text-decoration: none;
@@ -131,7 +192,7 @@
 
     .repo-nav { display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 20px; padding-bottom: 8px; overflow-x: auto; }
     .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 16px; font-size: 0.95rem; font-weight: 600; cursor: pointer; border-radius: 6px; text-decoration: none; }
-    .tab-btn.active { color: #fff; background: var(--card-bg); border: 1px solid var(--border); }
+    .tab-btn.active { color: var(--heading); background: var(--card-bg); border: 1px solid var(--border); }
 
     .git-toolbar {
       background: var(--card-bg);
@@ -156,7 +217,7 @@
     }
 
     .commit-banner {
-      background: #1c2128;
+      background: var(--surface-raised);
       border: 1px solid var(--border);
       border-bottom: none;
       padding: 10px 16px;
@@ -174,8 +235,8 @@
       border-radius: 0 0 8px 8px;
     }
     .file-table th, .file-table td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
-    .file-table th { background: #161b22; color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; }
-    .file-table tr:hover td { background: #1c2128; }
+    .file-table th { background: var(--card-bg); color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; }
+    .file-table tr:hover td { background: var(--surface-hover); }
     .file-name { color: var(--blue); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
 
     .file-viewer {
@@ -186,7 +247,7 @@
     }
     .viewer-header {
       padding: 10px 16px;
-      background: #161b22;
+      background: var(--card-bg);
       border-bottom: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
@@ -195,11 +256,11 @@
     pre code {
       display: block;
       padding: 16px;
-      background: #0d1117;
+      background: var(--code-bg);
       overflow-x: auto;
       font-family: "SFMono-Regular", Consolas, Menlo, monospace;
       font-size: 0.85rem;
-      color: #e6edf3;
+      color: var(--code-text);
       white-space: pre-wrap;
     }
 
@@ -216,7 +277,7 @@
       align-items: flex-start;
       gap: 16px;
     }
-    .nostr-item-title { color: #fff; font-size: 1rem; }
+    .nostr-item-title { color: var(--heading); font-size: 1rem; }
     .nostr-item-meta {
       color: var(--text-muted);
       font-size: 0.8rem;
@@ -229,7 +290,7 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
-    .nostr-item-title a { color: #fff; text-decoration: none; }
+    .nostr-item-title a { color: var(--heading); text-decoration: none; }
     .nostr-item-title a:hover { color: var(--blue); text-decoration: underline; }
     .comment-item {
       background: var(--card-bg);
@@ -250,14 +311,14 @@
       padding: 16px;
     }
     .thread-detail-panel {
-      background: #111827;
-      border: 1px solid #4f3b78;
+      background: var(--thread-bg);
+      border: 1px solid var(--thread-border);
       border-radius: 10px;
       box-shadow: inset 4px 0 0 var(--accent);
       padding: 20px;
     }
     .thread-detail-context {
-      color: #d2a8ff;
+      color: var(--thread-text);
       font-size: 0.78rem;
       font-weight: 700;
       letter-spacing: 0.08em;
@@ -286,10 +347,10 @@
       padding: 24px;
       text-align: center;
     }
-    .badge-red { background: #491b1b; color: #ff7b72; border: 1px solid var(--red); }
+    .badge-red { background: var(--badge-red-bg); color: var(--badge-red-text); border: 1px solid var(--red); }
 
     .modal {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      position: fixed; inset: 0; background: var(--modal-overlay);
       display: flex; align-items: center; justify-content: center; z-index: 99;
     }
     .modal-content {
@@ -302,10 +363,10 @@
     .form-field input, .form-field textarea { width: 100%; }
     .form-help { color: var(--text-muted); font-size: 0.78rem; }
     .proposal-target {
-      background: #111827;
-      border: 1px solid #4f3b78;
+      background: var(--thread-bg);
+      border: 1px solid var(--thread-border);
       border-radius: 6px;
-      color: #d2a8ff;
+      color: var(--thread-text);
       font-size: 0.85rem;
       overflow-wrap: anywhere;
       padding: 10px 12px;
@@ -647,7 +708,7 @@
 
         <div>
           <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Repository Identifier (d-tag):</label>
-          <input type="text" id="pub-repo-id" style="width:100%; color:var(--text-muted); background:#161b22;" readonly />
+          <input type="text" id="pub-repo-id" style="width:100%; color:var(--text-muted); background:var(--surface-raised);" readonly />
         </div>
 
         <div>
@@ -662,7 +723,7 @@
 
         <div>
           <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Clone URL:</label>
-          <input type="text" id="pub-repo-clone" style="width:100%; color:var(--text-muted); background:#161b22;" readonly />
+          <input type="text" id="pub-repo-clone" style="width:100%; color:var(--text-muted); background:var(--surface-raised);" readonly />
         </div>
 
         <div>
@@ -2755,17 +2816,17 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
           this.loadNostrTabs();
           if (indicator) {
             const warning = gitService.loadWarnings.get(this.currentDir);
-            indicator.style.color = warning ? "#d29922" : "var(--text-muted)";
+            indicator.style.color = warning ? "var(--warning)" : "var(--text-muted)";
             indicator.textContent = warning || "";
           }
           return true;
         } catch (err) {
           if (!isCurrentNavigation()) return false;
           if (indicator) {
-            indicator.style.color = "#da3633";
+            indicator.style.color = "var(--red)";
             indicator.textContent = `Error: ${err.message}`;
           }
-          document.getElementById("file-table-body").innerHTML = `<tr><td colspan="4" style="color:#da3633; padding:16px;">Failed to load repository: ${escapeHtml(err.message)}</td></tr>`;
+          document.getElementById("file-table-body").innerHTML = `<tr><td colspan="4" style="color:var(--red); padding:16px;">Failed to load repository: ${escapeHtml(err.message)}</td></tr>`;
           return false;
         }
       }
@@ -2794,7 +2855,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const gitIndicator = document.getElementById("loading-git-indicator");
         if (gitIndicator) {
           const warning = gitService.loadWarnings.get(this.currentDir);
-          gitIndicator.style.color = warning ? "#d29922" : "var(--text-muted)";
+          gitIndicator.style.color = warning ? "var(--warning)" : "var(--text-muted)";
           gitIndicator.textContent = warning || "";
         }
 
@@ -2853,13 +2914,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             const match = tree.find(e => e.path === seg && e.type === 'tree');
             if (!match) {
               document.getElementById("file-table-body").innerHTML = `
-                <tr><td colspan="4" style="padding:16px; color:#da3633;">
+                <tr><td colspan="4" style="padding:16px; color:var(--red);">
                   Path not found: ${escapeHtml(targetPath)}
                 </td></tr>
               `;
               document.getElementById("current-path-breadcrumb").textContent = "";
               if (gitIndicator) {
-                gitIndicator.style.color = "#da3633";
+                gitIndicator.style.color = "var(--red)";
                 gitIndicator.textContent = `Path not found: ${targetPath}`;
               }
               return;
@@ -2886,7 +2947,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             document.getElementById("file-viewer").classList.remove("hidden");
           } else {
             if (gitIndicator) {
-              gitIndicator.style.color = "#da3633";
+              gitIndicator.style.color = "var(--red)";
               gitIndicator.textContent = `File not found: ${filePath}`;
             }
           }
@@ -2906,13 +2967,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         this.showTabElement("code");
         document.getElementById("file-viewer").classList.add("hidden");
         document.getElementById("file-table-body").innerHTML = `
-          <tr><td colspan="4" style="padding:16px; color:#da3633;">
+          <tr><td colspan="4" style="padding:16px; color:var(--red);">
             Could not display Git data: ${escapeHtml(error?.message || error)}
           </td></tr>
         `;
         const indicator = document.getElementById("loading-git-indicator");
         if (indicator) {
-          indicator.style.color = "#da3633";
+          indicator.style.color = "var(--red)";
           indicator.textContent = error?.message || String(error);
         }
       }
@@ -2975,8 +3036,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             ? `#/repo/${repoPart}/tree/${refPart}/${hashFilePath(parentPath)}`
             : `#/repo/${repoPart}/tree/${refPart}`;
           rowsHtml += `
-            <tr style="background:#161b22;">
-              <td colspan="4"><a href="${escapeHtml(parentHash)}" class="file-name" style="color:#79c0ff; font-weight:600;">📁 .. (Go up to parent directory)</a></td>
+            <tr style="background:var(--card-bg);">
+              <td colspan="4"><a href="${escapeHtml(parentHash)}" class="file-name" style="color:var(--blue); font-weight:600;">📁 .. (Go up to parent directory)</a></td>
             </tr>
           `;
         }
@@ -3051,7 +3112,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           if (navigationGeneration !== this.navigationGeneration) return;
           const indicator = document.getElementById("loading-git-indicator");
           if (indicator) {
-            indicator.style.color = "#da3633";
+            indicator.style.color = "var(--red)";
             indicator.textContent = `Could not load commit: ${error.message}`;
           }
         }
@@ -5068,7 +5129,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
               <div class="repo-summary-item">
                 <span>⚡ Nostr State:</span>
-                <strong>${hasState ? '<span style="color:#7ee787;">✓ Authorized Ref Snapshot (30618)</span>' : '<span style="color:var(--text-muted);">No State Broadcast</span>'}</strong>
+                <strong>${hasState ? '<span style="color:var(--success-text);">✓ Authorized Ref Snapshot (30618)</span>' : '<span style="color:var(--text-muted);">No State Broadcast</span>'}</strong>
               </div>
               <div class="repo-summary-item">
                 <span>🐞 Issues:</span>

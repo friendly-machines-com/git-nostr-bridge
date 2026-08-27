@@ -245,6 +245,10 @@ request.
 
 ## Git and browser-state correctness
 
+- The visual theme follows the browser or operating-system light/dark
+  preference. Both the authored palette and browser-provided controls use the
+  selected color scheme; no client-side account or persistent override is
+  required.
 - Repository URLs are derived relative to the deployed `index.html`; there is
   no dependency on `/git/`, `/auth/`, or `auth.friendly-machines.com`.
 - Reading and publishing Nostr collaboration events uses relays and the
