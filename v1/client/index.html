@@ -421,9 +421,9 @@
     </a>
     <div style="display:flex; gap:12px; align-items:center;">
       <div id="user-badge" class="nostr-user-badge">
-        <span>Not connected</span>
+        <span>Browsing anonymously</span>
       </div>
-      <button class="btn btn-sm btn-primary" onclick="nostrService.login(true)">Connect nos2x</button>
+      <button id="nostr-sign-in-button" class="btn btn-sm btn-primary" onclick="nostrService.toggleLogin()">Sign in</button>
     </div>
   </header>
 
@@ -432,13 +432,13 @@
     <section id="view-overview">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div>
-          <h2>Local Git Repositories</h2>
-          <p style="color:var(--text-muted); font-size:0.9rem;">Loaded from <code>projects.list</code> & verified via Nostr NIP-34.</p>
+          <h2>Git repositories</h2>
+          <p style="color:var(--text-muted); font-size:0.9rem;">Browse code, issues, pull requests, and patches.</p>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
           <span id="nostr-refresh-status" style="color:var(--text-muted); font-size:0.85rem;"></span>
           <button class="btn" onclick="app.openRelaySettings()">Relay settings…</button>
-          <button id="nostr-refresh-button" class="btn btn-primary" onclick="app.refreshAllNostr()">⚡ Refresh Nostr Relays</button>
+          <button id="nostr-refresh-button" class="btn btn-primary" onclick="app.refreshAllNostr()">↻ Refresh activity</button>
         </div>
       </div>
 
@@ -464,7 +464,7 @@
 
       <div class="repo-nav">
         <button class="tab-btn active" id="tab-btn-code" onclick="app.switchTab('code')">📁 Code</button>
-        <button class="tab-btn" id="tab-btn-issues" onclick="app.switchTab('issues')">🐞 Nostr Issues <span class="badge badge-purple" id="issues-badge">0</span></button>
+        <button class="tab-btn" id="tab-btn-issues" onclick="app.switchTab('issues')">🐞 Issues <span class="badge badge-purple" id="issues-badge">0</span></button>
         <button class="tab-btn" id="tab-btn-prs" onclick="app.switchTab('prs')">🔀 Pull Requests <span class="badge badge-purple" id="prs-badge">0</span></button>
         <button class="tab-btn" id="tab-btn-patches" onclick="app.switchTab('patches')">🩹 Patches <span class="badge badge-purple" id="patches-badge">0</span></button>
         <button class="tab-btn" id="tab-btn-state" onclick="app.switchTab('state')">🌿 Branches &amp; Tags</button>
@@ -474,7 +474,7 @@
       <div id="tab-code">
         <div class="git-toolbar">
           <div class="git-selectors">
-            <label style="font-size:0.85rem; color:var(--text-muted);">Ref:</label>
+            <label style="font-size:0.85rem; color:var(--text-muted);">Branch or tag:</label>
             <select id="branch-select" onchange="app.onRefChange(this.value)"></select>
 
             <label style="font-size:0.85rem; color:var(--text-muted); margin-left:10px;">Commit:</label>
@@ -497,7 +497,7 @@
             <tr>
               <th>Name</th>
               <th>Type</th>
-              <th>Commit Tree</th>
+              <th>Object ID</th>
               <th style="text-align:right;">Actions</th>
             </tr>
           </thead>
@@ -520,10 +520,10 @@
       <!-- TAB: ISSUES -->
       <div id="tab-issues" class="hidden">
         <div style="display:flex; justify-content:space-between; margin-bottom:16px;">
-          <h3>Nostr NIP-34 Issues for this Repository (Kind 1621)</h3>
+          <h3>Issues for this repository</h3>
           <div style="display:flex; gap:8px;">
             <button class="btn btn-sm" onclick="app.refreshAllNostr()">↻ Refresh</button>
-            <button class="btn btn-green btn-sm" onclick="app.openNewIssueModal()">+ New Nostr Issue</button>
+            <button class="btn btn-green btn-sm" onclick="app.openNewIssueModal()">+ New issue</button>
           </div>
         </div>
         <div id="issues-list"></div>
@@ -531,7 +531,7 @@
 
       <!-- ISSUE DETAIL / NIP-22 THREAD -->
       <div id="tab-issue-detail" class="hidden thread-detail-panel">
-        <div class="thread-detail-context">Issue detail · NIP-34 / NIP-22</div>
+        <div class="thread-detail-context">Issue detail</div>
         <button class="btn btn-sm" onclick="app.switchTab('issues')" style="margin-bottom:16px;">← Back to Issues</button>
         <div id="issue-detail-content"></div>
       </div>
@@ -540,7 +540,7 @@
       <div id="tab-prs" class="hidden">
         <div style="display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; margin-bottom:16px;">
           <div>
-            <h3>Nostr Pull Requests (Kind 1618)</h3>
+            <h3>Pull requests for this repository</h3>
             <p class="form-help">Pull requests point to commits that can be fetched from a source clone URL.</p>
           </div>
           <div style="display:flex; flex-wrap:wrap; gap:8px;">
@@ -555,8 +555,8 @@
       <div id="tab-patches" class="hidden">
         <div style="display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; margin-bottom:16px;">
           <div>
-            <h3>Nostr Patches (Kind 1617)</h3>
-            <p class="form-help">Patches carry git format-patch messages directly on Nostr.</p>
+            <h3>Patches for this repository</h3>
+            <p class="form-help">Submit changes as files created by <code>git format-patch</code>.</p>
           </div>
           <div style="display:flex; flex-wrap:wrap; gap:8px;">
             <button class="btn btn-sm" onclick="app.refreshAllNostr()">↻ Refresh</button>
@@ -568,7 +568,7 @@
 
       <!-- PR / PATCH DETAIL / NIP-22 THREAD -->
       <div id="tab-pr-detail" class="hidden thread-detail-panel">
-        <div id="proposal-detail-context" class="thread-detail-context">Code proposal detail · NIP-34 / NIP-22</div>
+        <div id="proposal-detail-context" class="thread-detail-context">Code proposal detail</div>
         <button id="proposal-back-button" class="btn btn-sm" onclick="app.backToThreadList()" style="margin-bottom:16px;">← Back</button>
         <div id="pr-detail-content"></div>
       </div>
@@ -576,17 +576,16 @@
       <!-- TAB: STATE / SYNC -->
       <div id="tab-state" class="hidden">
         <div style="background:var(--card-bg); border:1px solid var(--border); padding:20px; border-radius:8px;">
-          <h3>Publish Current Branches and Tags</h3>
+          <h3>Publish branches and tags</h3>
           <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
-            Share the repository’s current default branch, branches, and tags
-            with other Nostr clients. This publishes metadata only; it does
-            not upload or change Git content.
+            Publish a signed snapshot of the repository’s default branch,
+            branches, and tags. This does not upload or change Git content.
           </p>
           <div style="margin-top:16px;">
             <pre><code id="state-json-preview">Loading branches and tags…</code></pre>
           </div>
           <div style="margin-top:16px;">
-            <button class="btn btn-primary" onclick="app.broadcastRepoState()">Publish Branches and Tags</button>
+            <button class="btn btn-primary" onclick="app.broadcastRepoState()">Publish branch and tag snapshot</button>
           </div>
         </div>
       </div>
@@ -596,13 +595,13 @@
   <!-- MODAL: NEW ISSUE -->
   <div id="issue-modal" class="modal hidden">
     <div class="modal-content">
-      <h3 style="margin-bottom:12px;">Create Nostr Issue (Kind 1621)</h3>
+      <h3 style="margin-bottom:12px;">New issue</h3>
       <div style="display:flex; flex-direction:column; gap:12px;">
         <input type="text" id="issue-title" placeholder="Issue Title..." />
         <textarea id="issue-desc" rows="5" placeholder="Description (Markdown text)..."></textarea>
         <div style="display:flex; justify-content:flex-end; gap:8px;">
           <button class="btn" onclick="document.getElementById('issue-modal').classList.add('hidden')">Cancel</button>
-          <button class="btn btn-primary" onclick="app.submitNewIssue()">Publish Issue</button>
+          <button class="btn btn-primary" onclick="app.submitNewIssue()">Publish issue</button>
         </div>
       </div>
     </div>
@@ -611,14 +610,14 @@
   <!-- MODAL: NEW PR -->
   <div id="pr-modal" class="modal hidden">
     <div class="modal-content">
-      <h3 style="margin-bottom:4px;">Propose Pull Request (Kind 1618)</h3>
+      <h3 style="margin-bottom:4px;">New pull request</h3>
       <p class="form-help" style="margin-bottom:12px;">The current repository is the target. The source clone must contain the proposed tip commit.</p>
       <div style="display:flex; flex-direction:column; gap:12px;">
         <div id="pr-revision-context" class="proposal-target hidden"></div>
         <div class="form-field">
           <label>Target repository</label>
           <div id="pr-target" class="proposal-target"></div>
-          <div class="form-help">NIP-34 identifies the target repository, but has no separate target-branch tag.</div>
+          <div class="form-help">The pull request proposes a source commit for this repository; it does not select a target branch.</div>
         </div>
         <div class="form-field">
           <label for="pr-title">Title</label>
@@ -647,7 +646,7 @@
         </div>
         <div style="display:flex; justify-content:flex-end; gap:8px;">
           <button class="btn" onclick="document.getElementById('pr-modal').classList.add('hidden')">Cancel</button>
-          <button id="pr-publish-button" class="btn btn-primary" onclick="app.submitNewPR()">Publish PR</button>
+          <button id="pr-publish-button" class="btn btn-primary" onclick="app.submitNewPR()">Publish pull request</button>
         </div>
       </div>
     </div>
@@ -656,8 +655,8 @@
   <!-- MODAL: NEW PATCH / PATCH SET -->
   <div id="patch-modal" class="modal hidden">
     <div class="modal-content">
-      <h3 style="margin-bottom:4px;">Publish Patch or Patch Set (Kind 1617)</h3>
-      <p class="form-help" style="margin-bottom:12px;">Each git format-patch message becomes one Nostr event. The first is the root; later messages reply to the previous patch.</p>
+      <h3 style="margin-bottom:4px;">New patch set</h3>
+      <p class="form-help" style="margin-bottom:12px;">Each <code>git format-patch</code> message is published in order as part of one patch set.</p>
       <div style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-field">
           <label>Target repository</label>
@@ -672,11 +671,11 @@
         <div class="form-field">
           <label for="patch-content">Paste git format-patch output</label>
           <textarea id="patch-content" rows="12" spellcheck="false" placeholder="Paste output from git format-patch -1 --stdout, or an entire --stdout patch series."></textarea>
-          <div class="form-help">A pasted mbox series is split into one event per format-patch message. Your signer confirms each event. Use a pull request when any resulting event would approach 60 KB.</div>
+          <div class="form-help">A pasted mbox series is split into its individual patch messages. Your browser extension asks you to approve each one. Patch content must not exceed 59,000 bytes, and each final encoded message must be under 60,000 bytes; use a pull request for larger changes.</div>
         </div>
         <div style="display:flex; justify-content:flex-end; gap:8px;">
           <button class="btn" onclick="document.getElementById('patch-modal').classList.add('hidden')">Cancel</button>
-          <button id="patch-publish-button" class="btn btn-primary" onclick="app.submitNewPatch()">Publish Patch Event(s)</button>
+          <button id="patch-publish-button" class="btn btn-primary" onclick="app.submitNewPatch()">Publish patch set</button>
         </div>
       </div>
     </div>
@@ -685,8 +684,8 @@
   <!-- MODAL: UPDATE PR TIP (KIND 1619) -->
   <div id="pr-update-modal" class="modal hidden">
     <div class="modal-content">
-      <h3 style="margin-bottom:4px;">Update Pull Request Tip (Kind 1619)</h3>
-      <p class="form-help" style="margin-bottom:12px;">A PR update changes the source tip and where it can be fetched; it does not change the target repository.</p>
+      <h3 style="margin-bottom:4px;">Update pull request</h3>
+      <p class="form-help" style="margin-bottom:12px;">Change the proposed source commit and where it can be fetched. The target repository remains the same.</p>
       <div style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-field">
           <label>Target repository</label>
@@ -706,7 +705,7 @@
         </div>
         <div style="display:flex; justify-content:flex-end; gap:8px;">
           <button class="btn" onclick="document.getElementById('pr-update-modal').classList.add('hidden')">Cancel</button>
-          <button class="btn btn-primary" onclick="app.submitPrUpdate()">Publish PR Update</button>
+          <button class="btn btn-primary" onclick="app.submitPrUpdate()">Publish pull request update</button>
         </div>
       </div>
     </div>
@@ -728,9 +727,9 @@
           <div class="form-help">Queried in addition to both domain discovery and repository relays.</div>
         </div>
         <div class="form-field">
-          <label for="relay-discovery">Additional announcement-discovery relays</label>
+          <label for="relay-discovery">Additional discovery relays</label>
           <textarea id="relay-discovery" rows="3" spellcheck="false"></textarea>
-          <div class="form-help">Used only to locate the domain authority’s exact kind-30617 repository announcements.</div>
+          <div class="form-help">Used only to find this site’s repository collaboration settings.</div>
         </div>
         <div class="form-field">
           <label for="relay-disabled">Disabled relays</label>
@@ -748,11 +747,11 @@
 <!-- MODAL: ANNOUNCE / EDIT REPO (KIND 30617) -->
   <div id="publish-modal" class="modal hidden">
     <div class="modal-content">
-      <h3 style="margin-bottom:14px;">Announce Repository to Nostr (Kind 30617)</h3>
+      <h3 style="margin-bottom:14px;">Repository collaboration settings</h3>
       <div style="display:flex; flex-direction:column; gap:12px;">
 
         <div>
-          <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Repository Identifier (d-tag):</label>
+          <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Repository ID:</label>
           <input type="text" id="pub-repo-id" style="width:100%; color:var(--text-muted); background:var(--surface-raised);" readonly />
         </div>
 
@@ -775,15 +774,14 @@
           <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Repository relays (1–4, one per line):</label>
           <textarea id="pub-repo-relays" rows="3" style="width:100%;" spellcheck="false"></textarea>
           <div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">
-            The client tries every listed relay. One acknowledgement publishes
-            the announcement; using several relays improves availability when
-            some of them are offline.
+            These relays store repository discussions and proposals. Using
+            several improves availability when one is offline.
           </div>
         </div>
 
         <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
           <button class="btn" onclick="document.getElementById('publish-modal').classList.add('hidden')">Cancel</button>
-          <button class="btn btn-primary" onclick="app.submitAnnouncement()">⚡ Sign & Publish with nos2x</button>
+          <button class="btn btn-primary" onclick="app.submitAnnouncement()">Publish collaboration settings</button>
         </div>
 
       </div>
@@ -1071,7 +1069,7 @@
       if (bytes === 0) throw new Error(`Patch ${index + 1} is empty.`);
       if (bytes > PATCH_CONTENT_PREFLIGHT_LIMIT) {
         throw new Error(
-          `Patch ${index + 1} is ${bytes.toLocaleString()} bytes. Use a pull request so the Nostr event remains below NIP-34's approximately 60 KB patch recommendation.`
+          `Patch ${index + 1} is ${bytes.toLocaleString()} bytes; patch content must not exceed 59,000 bytes. Use a pull request for larger changes.`
         );
       }
       const envelopes = content.match(FORMAT_PATCH_ENVELOPE) || [];
@@ -1258,7 +1256,7 @@
       return [
         parts.actor,
         ...parts.externalIdentities.map(identity => (
-          `GitHub @${identity.login} (verified via NIP-39)`
+          `GitHub @${identity.login} (verified)`
         )),
         parts.origin,
         parts.signer
@@ -1270,7 +1268,7 @@
       const external = parts.externalIdentities.map(identity => {
         const login = escapeHtml(identity.login);
         const url = `https://github.com/${encodeURIComponent(identity.login)}`;
-        return `<a class="external-identity" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="This GitHub account published the NIP-39 proof for this Nostr signing key">✓ GitHub @${login}</a>`;
+        return `<a class="external-identity" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="This GitHub account proved control of this signing key">✓ GitHub @${login}</a>`;
       });
       return [
         escapeHtml(parts.actor),
@@ -1737,28 +1735,52 @@
 
       async login(userInitiated = false) {
         if (!window.nostr) {
-          if (userInitiated) alert("Nostr extension not detected.");
+          if (userInitiated) {
+            alert(
+              "Sign-in is unavailable. Install or enable a Nostr browser extension, then try again."
+            );
+          }
           return false;
         }
         try {
           const pubkey = await window.nostr.getPublicKey();
-          if (!HEX_64.test(pubkey || "")) throw new Error("Signer returned an invalid public key");
+          if (!HEX_64.test(pubkey || "")) {
+            throw new Error("The sign-in provider returned invalid identity data.");
+          }
           this.pubkey = pubkey.toLowerCase();
           this.renderBadge();
           return true;
         } catch (e) {
-          if (userInitiated) alert("Auth error: " + e.message);
+          if (userInitiated) alert("Sign-in failed: " + e.message);
           return false;
         }
       }
 
+      async toggleLogin() {
+        if (this.pubkey) {
+          this.pubkey = null;
+          this.renderBadge();
+          return;
+        }
+        await this.login(true);
+      }
+
       renderBadge(text) {
         const badge = document.getElementById("user-badge");
-        if (!badge) return;
-        if (text) {
-          badge.textContent = `⚡ ${text}`;
-        } else if (this.pubkey) {
-          badge.textContent = `⚡ ${this.pubkey.slice(0, 8)}...${this.pubkey.slice(-4)}`;
+        const button = document.getElementById("nostr-sign-in-button");
+        if (text && badge) {
+          badge.textContent = text;
+        } else if (this.pubkey && badge) {
+          badge.textContent =
+            `Signed in · ${this.pubkey.slice(0, 8)}…${this.pubkey.slice(-4)}`;
+        } else if (badge) {
+          badge.textContent = "Browsing anonymously";
+        }
+        if (button) {
+          button.textContent = this.pubkey ? "Sign out" : "Sign in";
+          button.title = this.pubkey
+            ? "Forget this account in this page; your browser extension remains signed in"
+            : "Use the active account from your Nostr browser extension";
         }
       }
 
@@ -1889,9 +1911,13 @@
         this.publishInProgress = true;
         this.publicationWarnings = [];
         try {
-        if (!window.nostr) throw new Error("No Nostr extension detected.");
+        if (!window.nostr) {
+          throw new Error(
+            "Sign-in is unavailable. Install or enable a Nostr browser extension."
+          );
+        }
         if (!await this.login(false) || !this.pubkey) {
-          throw new Error("Connect a Nostr signer first.");
+          throw new Error("Sign in to publish.");
         }
         await this.ensureConnected(relayUrls);
 
@@ -1902,10 +1928,10 @@
         const signedEvent = await window.nostr.signEvent(requestedEvent);
 
         if (!await eventIdMatchesContent(signedEvent)) {
-          throw new Error("The Nostr signer returned an invalid event.");
+          throw new Error("The sign-in provider returned an invalid signed event.");
         }
         if (signedEvent.pubkey.toLowerCase() !== this.pubkey.toLowerCase()) {
-          throw new Error("The signer used a different public key than the connected account.");
+          throw new Error("The sign-in provider used a different account.");
         }
         if (
           signedEvent.kind !== requestedEvent.kind
@@ -1913,7 +1939,7 @@
           || signedEvent.content !== requestedEvent.content
           || JSON.stringify(signedEvent.tags) !== JSON.stringify(requestedEvent.tags)
         ) {
-          throw new Error("The signer changed the event payload.");
+          throw new Error("The sign-in provider changed the event before signing.");
         }
         const requestedRelays = new Set(relayUrls);
         const openSockets = Array.from(this.sockets.entries())
@@ -2644,7 +2670,7 @@ async loadRepoOnce(repoPath) {
           throw new Error("This repository has no enabled collaboration relay.");
         }
         if (!nostrService.pubkey && !await nostrService.login(false)) {
-          throw new Error("Connect a Nostr signer first.");
+          throw new Error("Sign in to publish.");
         }
         const author = nostrService.pubkey?.toLowerCase() || null;
         const recipients = sortedUniqueStrings(recipientPubkeys
@@ -3485,11 +3511,11 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           if (!trustedHostPubkey) {
             fetchErrors.push(
-              `NIP-05 names._ does not contain a valid repository authority for ${hostDomain}`
+              `${hostDomain} does not publish a valid repository ownership identity`
             );
           } else if (discoveryRelays.length === 0) {
             fetchErrors.push(
-              `NIP-05 supplies no usable discovery relays for ${hostDomain}`
+              `${hostDomain} does not list any usable discovery relays`
             );
           } else {
             try {
@@ -4324,11 +4350,11 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         if (!container) return;
 
         if (this.nostrLoading && !this.nostrLoaded) {
-          container.innerHTML = '<div class="nostr-empty">Loading from Nostr relays…</div>';
+          container.innerHTML = '<div class="nostr-empty">Loading repository activity…</div>';
           return;
         }
         if (this.nostrError && !this.nostrLoaded) {
-          container.innerHTML = `<div class="nostr-empty">Could not load Nostr data: ${escapeHtml(this.nostrError)}</div>`;
+          container.innerHTML = `<div class="nostr-empty">Could not load repository activity: ${escapeHtml(this.nostrError)}</div>`;
           return;
         }
         const partialWarning = this.nostrError && this.nostrLoaded
@@ -4336,7 +4362,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           : "";
         if (!data?.announcement) {
           container.innerHTML = partialWarning
-            + '<div class="nostr-empty">This repository has no known Nostr announcement, so it has no NIP-34 address to query.</div>';
+            + '<div class="nostr-empty">Collaboration has not been set up for this repository.</div>';
           return;
         }
         if (!events.length) {
@@ -4558,7 +4584,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             : "issue";
         const detailContext = document.getElementById("proposal-detail-context");
         if (detailContext && threadType !== "issue") {
-          detailContext.textContent = "Code proposal detail · NIP-34 / NIP-22";
+          detailContext.textContent = "Code proposal detail";
         }
         const backButton = document.getElementById("proposal-back-button");
         if (backButton && threadType !== "issue") {
@@ -4568,7 +4594,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }
 
         if (this.nostrLoading && !this.nostrLoaded) {
-          container.innerHTML = `<div class="nostr-empty">Loading ${noun} and comments from Nostr relays…</div>`;
+          container.innerHTML = `<div class="nostr-empty">Loading ${noun} and comments…</div>`;
           return;
         }
         if (this.nostrError && !this.nostrLoaded) {
@@ -4583,12 +4609,12 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             ? `<div class="nostr-empty">This ${noun} was deleted by its author.</div>`
             : this.nostrError && this.nostrLoaded
               ? `<div class="nostr-empty">${escapeHtml(noun)} not found in saved data. Some updates could not be retrieved, so the result may be incomplete.</div>`
-              : `<div class="nostr-empty">${escapeHtml(noun)} not found on the configured Nostr relays.</div>`;
+              : `<div class="nostr-empty">${escapeHtml(noun)} not found on the configured relays.</div>`;
           return;
         }
         noun = root.kind === 1618 ? "pull request" : root.kind === 1617 ? "patch" : "issue";
         if (detailContext && threadType !== "issue") {
-          detailContext.textContent = `${root.kind === 1618 ? "Pull request" : "Patch"} detail · NIP-34 / NIP-22`;
+          detailContext.textContent = `${root.kind === 1618 ? "Pull request" : "Patch"} detail`;
         }
         const partialWarning = this.nostrError && this.nostrLoaded
           ? `<div class="nostr-empty" style="margin-bottom:10px; text-align:left;">Some updates could not be retrieved. This discussion may be incomplete. Details: ${escapeHtml(this.nostrDiagnostics.join("; "))}</div>`
@@ -4635,8 +4661,6 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const commentDraft = this.commentDrafts.get(commentScope.id) || "";
         const [statusLabel, statusClass] = this.statusFor(root, data);
         const currentStatusKind = this.statusKindFor(root, data);
-        const quickStatusKind = currentStatusKind === 1630 ? 1632 : 1630;
-        const quickStatusLabel = currentStatusKind === 1630 ? "Close" : "Reopen";
         const rootDate = new Date(root.created_at * 1000).toLocaleString();
         const labels = scalarTagValues(root, "t")
           .filter(label => label !== "root" && label !== "root-revision");
@@ -4647,9 +4671,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const effectivePr = prUpdate || root;
         const targetRepositoryName = uniqueTagValue(data.announcement, "name")
           || this.currentRepo.name;
-        const targetRepositoryLabel = data.address
-          ? `${targetRepositoryName} — ${data.address}`
-          : targetRepositoryName;
+        const targetRepositoryLabel = targetRepositoryName;
         const sourceClones = cloneUrlValues(effectivePr);
         const prDetails = root.kind === 1618
           ? [
@@ -4692,7 +4714,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                           : ""}
                       </div>
                     `
-                  : '<div class="form-help">The referenced patch has not arrived from the configured relays yet; its link remains resolvable.</div>'}
+                  : '<div class="form-help">The referenced patch has not arrived from the configured relays yet.</div>'}
               </div>
             `
           : root.kind === 1617 && linkedPullRequests.length > 0
@@ -4732,8 +4754,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   series.length === 1
                     ? "One format-patch message"
                     : branched
-                      ? `${series.length} format-patch messages in a branched causal reply graph; no total patch order is inferred`
-                      : `${series.length} format-patch messages in causal reply order`
+                      ? `${series.length} format-patch messages with multiple replies to the same patch`
+                      : `${series.length} format-patch messages in reply order`
                 }
               </div>
               ${series.map((patch, index) => {
@@ -4750,7 +4772,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   return `
                     <div class="patch-event" style="padding:12px;">
                       <strong>${patchLabel}</strong>
-                      <div class="nostr-item-meta">Deleted by its author; retained as a series tombstone · ${patchCommentCount} ${patchCommentCount === 1 ? "comment" : "comments"}</div>
+                      <div class="nostr-item-meta">Deleted by its author · ${patchCommentCount} ${patchCommentCount === 1 ? "comment" : "comments"}</div>
                       ${parentId ? `<div class="nostr-item-meta">Replies to <code title="${escapeHtml(parentId)}">${escapeHtml(parentId.slice(0, 12))}…</code></div>` : ""}
                     </div>
                   `;
@@ -4775,10 +4797,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ? patchGroupsHtml
           : `<div class="nostr-item-content">${escapeHtml(root.content || "No description.")}</div>`;
         const immutabilityNotice = root.kind === 1621
-          ? "NIP-34 issue titles and descriptions are immutable. Publish a correction as a comment; status can be changed below."
+          ? "Issue titles and descriptions cannot be edited. Publish a correction as a comment; status can be changed below."
           : root.kind === 1618
-            ? "The PR description event is immutable. Its author can publish a kind 1619 tip update below. Marking it merged records status on Nostr; it does not modify the Git repository."
-            : "Patch events are immutable; discussion and status changes are separate events. Marking one applied records status on Nostr; it does not modify the Git repository.";
+            ? "The pull-request description cannot be edited. Its author can publish a new source commit below. Marking it merged records the decision; it does not merge the Git repository."
+            : "Patch contents cannot be edited. Marking a patch applied records the decision; it does not change the Git repository.";
         const commentsHtml = commentRows.map(({ comment, depth }) => {
           if (eventIsDeleted(comment, data.deletionIndex)) {
             return `
@@ -4850,7 +4872,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           ${patchDiscussionSelector}
           <h3 style="margin-top:24px;">${escapeHtml(discussionLabel)} <span class="badge badge-purple">${comments.length}</span></h3>
-          ${unresolvedCommentCount ? `<div class="nostr-empty" style="margin-top:10px; text-align:left;">${unresolvedCommentCount} comment event${unresolvedCommentCount === 1 ? " is" : "s are"} waiting for a complete, valid parent chain. The client will retry automatically.</div>` : ""}
+          ${unresolvedCommentCount ? `<div class="nostr-empty" style="margin-top:10px; text-align:left;">${unresolvedCommentCount} ${unresolvedCommentCount === 1 ? "comment is" : "comments are"} waiting for missing parent comments. The client will retry automatically.</div>` : ""}
           <div class="comment-tree">${commentsHtml || '<div class="nostr-empty" style="margin-top:10px;">No comments yet.</div>'}</div>
 
           <div class="comment-compose">
@@ -4861,16 +4883,15 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               <div class="thread-status-controls">
                 <label for="thread-status-select" class="nostr-item-meta" style="margin:0;">${root.kind === 1617 ? "Patch-set status" : "Status"}</label>
                 <select id="thread-status-select">${this.statusOptionsHtml(root, data)}</select>
-                <button class="btn btn-sm" onclick="app.setRootStatus('${escapeHtml(root.id)}', document.getElementById('thread-status-select').value)">Set status</button>
-                <button class="btn btn-sm" onclick="app.setRootStatus('${escapeHtml(root.id)}', '${quickStatusKind}')">${quickStatusLabel}</button>
-                ${root.kind === 1618 ? `<button class="btn btn-sm" onclick="app.openPrUpdateModal('${escapeHtml(root.id)}')">Update PR tip…</button>` : ""}
+                <button class="btn btn-sm" onclick="app.setRootStatus('${escapeHtml(root.id)}', document.getElementById('thread-status-select').value)">Publish status</button>
+                ${root.kind === 1618 ? `<button class="btn btn-sm" onclick="app.openPrUpdateModal('${escapeHtml(root.id)}')">Update source commit…</button>` : ""}
                 ${root.kind === 1617 && currentStatusKind !== 1631
-                  ? `<button class="btn btn-sm btn-primary" onclick="app.openNewPRModal('${escapeHtml(root.id)}')">${linkedPullRequests.length > 0 ? "Create another linked PR…" : "Convert to Pull Request…"}</button>`
+                  ? `<button class="btn btn-sm btn-primary" onclick="app.openNewPRModal('${escapeHtml(root.id)}')">${linkedPullRequests.length > 0 ? "Create another linked pull request…" : "Convert to pull request…"}</button>`
                   : ""}
               </div>
               <div style="display:flex; gap:8px;">
                 <button id="cancel-comment-reply" class="btn btn-sm hidden" onclick="app.setCommentParent('${escapeHtml(commentScope.id)}')">Cancel reply</button>
-                <button class="btn btn-primary" onclick="app.submitRootComment('${escapeHtml(root.id)}')">Publish Comment</button>
+                <button class="btn btn-primary" onclick="app.submitRootComment('${escapeHtml(root.id)}')">Publish comment</button>
               </div>
             </div>
           </div>
@@ -4994,7 +5015,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           throw new Error("The discussion root is no longer available.");
         }
         if (!await nostrService.login(false) || !nostrService.pubkey) {
-          throw new Error("Connect a Nostr signer first.");
+          throw new Error("Sign in to change this status.");
         }
         const allowedAuthors = verificationService.statusAuthorPubkeys(
           root,
@@ -5013,7 +5034,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         additionalPubkeys = []
       ) {
         if (!NIP34_STATUS_KIND_SET.has(statusKind)) {
-          throw new Error("Invalid NIP-34 status.");
+          throw new Error("Unsupported status.");
         }
         await this.requireRootStatusAuthority(root, data);
         const repositoryRelays = repositoryRelayUrls(data.announcement);
@@ -5046,7 +5067,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       async setRootStatus(rootId, requestedKind) {
         const statusKind = Number(requestedKind);
         if (!NIP34_STATUS_KIND_SET.has(statusKind)) {
-          return alert("Invalid NIP-34 status.");
+          return alert("Unsupported status.");
         }
 
         try {
@@ -5198,26 +5219,26 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         document.getElementById("issues-badge").textContent = data.issues.length;
         document.getElementById("prs-badge").textContent = data.pullRequests.length;
         document.getElementById("patches-badge").textContent = data.patchRoots.length;
-        this.renderNostrList("issues-list", data.issues, data, "No Nostr issues found for this repository.");
-        this.renderNostrList("prs-list", data.pullRequests, data, "No Nostr pull requests found for this repository.");
-        this.renderNostrList("patches-list", data.patchRoots, data, "No Nostr root patches found for this repository.");
+        this.renderNostrList("issues-list", data.issues, data, "No issues yet.");
+        this.renderNostrList("prs-list", data.pullRequests, data, "No pull requests yet.");
+        this.renderNostrList("patches-list", data.patchRoots, data, "No patches yet.");
 
         const announcement = data.announcement;
         if (announcement) {
           document.getElementById("repo-name-header").textContent = uniqueTagValue(announcement, "name") || this.currentRepo.name;
           const description = uniqueTagValue(announcement, "description") || this.currentRepo.desc;
-          document.getElementById("repo-desc-header").textContent = `${description} (Local: ./${this.currentRepo.path})`;
+          document.getElementById("repo-desc-header").textContent = description;
         } else {
           document.getElementById("repo-name-header").textContent = this.currentRepo.name;
-          document.getElementById("repo-desc-header").textContent = `${this.currentRepo.desc} (Local: ./${this.currentRepo.path})`;
+          document.getElementById("repo-desc-header").textContent = this.currentRepo.desc;
         }
         const headerBadge = document.getElementById("repo-header-badge");
         if (headerBadge) {
           headerBadge.innerHTML = data.nip05
-            ? `<span class="badge badge-green">✓ ${escapeHtml(data.nip05)}</span>`
+            ? `<span class="badge badge-green" title="Repository ownership verified by ${escapeHtml(data.nip05)}">✓ Verified</span>`
             : announcement
-              ? '<span class="badge badge-purple">⚡ Nostr announcement</span>'
-              : '<span class="badge">Local only</span>';
+              ? '<span class="badge badge-purple">Collaboration available</span>'
+              : '<span class="badge">Code only</span>';
         }
         const stars = Array.isArray(data.stars) ? data.stars : [];
         const starCount = new Set(
@@ -5234,7 +5255,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             ? "★ Starred " : "☆ Star ";
           starButton.title = announcement
             ? (ownStarred ? "Unstar this repository" : "Star this repository")
-            : "A verified Nostr repository announcement is required";
+            : "Set up collaboration before starring this repository";
         }
         if (starCountElement) starCountElement.textContent = String(starCount);
       }
@@ -5244,7 +5265,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ? this.nostrData[this.currentRepo.id] : null;
         const announcement = data?.announcement;
         if (!announcement) {
-          alert("A verified Nostr repository announcement is required.");
+          alert("Collaboration has not been set up for this repository.");
           return;
         }
         const button = document.getElementById("repo-star-button");
@@ -5266,7 +5287,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             }, 250);
           }
           if (!await nostrService.login(false) || !nostrService.pubkey) {
-            throw new Error("Connect a Nostr signer first.");
+            throw new Error("Sign in to star this repository.");
           }
           const relayUrls = await this.publicationRelayUrls(
             announcement,
@@ -5399,7 +5420,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         document.getElementById("publish-modal").classList.remove("hidden");
       }
 
-      // 2. Sign and broadcast to Nostr relays via nos2x
+      // 2. Sign and broadcast to Nostr relays through the user's NIP-07 provider.
       async submitAnnouncement() {
         const repoId = document.getElementById("pub-repo-id").value.trim();
         const name = document.getElementById("pub-repo-name").value.trim() || repoId;
@@ -5421,18 +5442,18 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
         try {
           if (!await nostrService.login(false)) {
-            throw new Error("Connect a Nostr signer first.");
+            throw new Error("Sign in to publish collaboration settings.");
           }
           const authority = await verificationService.getDomainAuthority(
             window.location.hostname,
             true
           );
           if (!authority.pubkey) {
-            throw new Error("This domain has no valid NIP-05 names._ repository authority.");
+            throw new Error("This site has no repository publishing identity configured.");
           }
           if (nostrService.pubkey.toLowerCase() !== authority.pubkey) {
             throw new Error(
-              "Only the domain’s NIP-05 names._ key may publish repository announcements."
+              "The signed-in account cannot manage collaboration settings for this site."
             );
           }
           const data = this.nostrData[repoId] || {};
@@ -5466,7 +5487,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             nip65WriteRelays(relayListHeads.get(authority.pubkey))
           ]);
           if (publicationRelays.length === 0) {
-            throw new Error("No announcement publication relay is configured.");
+            throw new Error("No relay is configured for publishing collaboration settings.");
           }
           const signedAnnouncement = await nostrService.signAndPublish({
             kind: 30617,
@@ -5485,15 +5506,15 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           const warnings = nostrService.takePublicationWarnings();
           alert(
-            `Successfully announced repository “${name}” to Nostr.`
+            `Published collaboration settings for “${name}”.`
             + (warnings.length > 0
-              ? `\n\nSome configured relays were unavailable:\n${warnings.join("\n")}`
+              ? `\n\nSome relays were unavailable:\n${warnings.join("\n")}`
               : "")
           );
           document.getElementById("publish-modal").classList.add("hidden");
           await this.refreshAllNostr();
         } catch (e) {
-          alert("Failed to sign/publish: " + e.message);
+          alert("Could not publish collaboration settings: " + e.message);
         }
       }
 
@@ -5521,11 +5542,11 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const displayName = uniqueTagValue(announcement, "name") || repo.name;
           const displayDesc = uniqueTagValue(announcement, "description") || repo.desc;
 
-          let provenanceBadge = '<span class="badge">Local Only</span>';
+          let provenanceBadge = '<span class="badge">Code only</span>';
           if (hasAnnouncement) {
             provenanceBadge = nip05
-              ? `<span class="badge badge-green" title="Verified via /.well-known/nostr.json">✓ ${escapeHtml(nip05)}</span>`
-              : `<span class="badge badge-purple" title="Announced on Nostr">⚡ Nostr (Unverified)</span>`;
+              ? `<span class="badge badge-green" title="Repository ownership verified by ${escapeHtml(nip05)}">✓ Verified</span>`
+              : '<span class="badge badge-purple">Collaboration available</span>';
           }
 
           return `
@@ -5539,8 +5560,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               </div>
 
               <div class="repo-summary-item">
-                <span>⚡ Nostr State:</span>
-                <strong>${hasState ? '<span style="color:var(--success-text);">✓ Authorized Ref Snapshot (30618)</span>' : '<span style="color:var(--text-muted);">No State Broadcast</span>'}</strong>
+                <span>🌿 Repository branches &amp; tags:</span>
+                <strong>${hasState ? '<span style="color:var(--success-text);">✓ Snapshot published</span>' : '<span style="color:var(--text-muted);">Not published</span>'}</strong>
               </div>
               <div class="repo-summary-item">
                 <span>🐞 Issues:</span>
@@ -5548,9 +5569,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               </div>
 
               <div style="margin-top:16px; display:flex; gap:8px;">
-                <a href="#/repo/${escapeHtml(hashSegment(repo.id))}" class="btn btn-sm btn-primary">Browse Repository</a>
+                <a href="#/repo/${escapeHtml(hashSegment(repo.id))}" class="btn btn-sm btn-primary">Browse repository</a>
                 <button class="btn btn-sm" data-repo-id="${escapeHtml(repo.id)}" onclick="app.openPublishModal(this.dataset.repoId)">
-                  ${hasAnnouncement ? 'Publish / update announcement…' : 'Publish announcement…'}
+                  ${hasAnnouncement ? 'Edit collaboration…' : 'Set up collaboration…'}
                 </button>
               </div>
             </div>
@@ -5562,13 +5583,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         try {
           const data = this.nostrData[this.currentRepo.id];
           if (!data?.announcement) {
-            throw new Error("Publish a repository announcement before publishing its state.");
+            throw new Error("Set up collaboration before publishing branches and tags.");
           }
           if (!await nostrService.login(false)) {
-            throw new Error("Connect a Nostr signer first.");
+            throw new Error("Sign in to publish branches and tags.");
           }
           if (!verificationService.maintainerPubkeys(data.announcement).has(nostrService.pubkey.toLowerCase())) {
-            throw new Error("The connected signer is not a maintainer of this repository announcement.");
+            throw new Error("The signed-in account is not a repository maintainer.");
           }
           const tags = await this.repositoryStateTags();
           const signedState = await nostrService.signAndPublish({
@@ -5581,7 +5602,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ));
           this.cacheEvents([signedState]);
           alert(
-            `Published branches and tags for repository “${this.currentRepo.name}” to Nostr.`
+            `Published branches and tags for “${this.currentRepo.name}”.`
           );
           await this.refreshAllNostr();
         } catch (e) {
@@ -5608,8 +5629,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         this.prRevisionPatchId = revisionPatch?.id || null;
         const targetName = uniqueTagValue(data?.announcement, "name") || this.currentRepo?.name || "Unknown repository";
         document.getElementById("pr-target").textContent = data?.address
-          ? `${targetName} — ${data.address}`
-          : `${targetName} — no Nostr repository announcement`;
+          ? targetName
+          : `${targetName} — collaboration is not set up`;
         if (repoChanged || revisionChanged) {
           document.getElementById("pr-title").value = revisionPatch
             ? patchSubject(revisionPatch.content)
@@ -5623,7 +5644,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const revisionContext = document.getElementById("pr-revision-context");
         revisionContext.classList.toggle("hidden", !revisionPatch);
         revisionContext.textContent = revisionPatch
-          ? `Converting patch ${revisionPatch.id.slice(0, 12)}… into a linked pull request. After the PR is acknowledged, the client will publish a separate Closed status for the patch.`
+          ? `This pull request will supersede patch ${revisionPatch.id.slice(0, 12)}…. The patch will be closed after the pull request is published.`
           : "";
         document.getElementById("pr-modal").classList.remove("hidden");
       }
@@ -5635,8 +5656,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const data = this.patchModalRepoId ? this.nostrData[this.patchModalRepoId] : null;
         const targetName = uniqueTagValue(data?.announcement, "name") || this.currentRepo?.name || "Unknown repository";
         document.getElementById("patch-target").textContent = data?.address
-          ? `${targetName} — ${data.address}`
-          : `${targetName} — no Nostr repository announcement`;
+          ? targetName
+          : `${targetName} — collaboration is not set up`;
         if (repoChanged) {
           document.getElementById("patch-files").value = "";
           document.getElementById("patch-content").value = "";
@@ -5668,7 +5689,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const repoId = this.issueModalRepoId;
           const data = repoId ? this.nostrData[repoId] : null;
           if (!data?.announcement || !data.address) {
-            throw new Error("This repository has no Nostr announcement to attach the issue to.");
+            throw new Error("Collaboration has not been set up for this repository.");
           }
           const signedIssue = await nostrService.signAndPublish({
             kind: 1621,
@@ -5683,12 +5704,12 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             [data.announcement.pubkey]
           ));
           this.cacheEvents([signedIssue]);
-          alert("Issue published to Nostr!");
+          alert("Issue published.");
           document.getElementById("issue-modal").classList.add("hidden");
           document.getElementById("issue-title").value = "";
           document.getElementById("issue-desc").value = "";
           await this.refreshAllNostr();
-        } catch(e) { alert("Failed to sign/publish: " + e.message); }
+        } catch(e) { alert("Could not publish issue: " + e.message); }
       }
 
       async submitNewPR() {
@@ -5718,7 +5739,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const repoId = this.prModalRepoId;
           const data = repoId ? this.nostrData[repoId] : null;
           if (!data?.announcement || !data.address) {
-            throw new Error("This repository has no Nostr announcement to attach the pull request to.");
+            throw new Error("Collaboration has not been set up for this repository.");
           }
           const revisionPatch = this.prRevisionPatchId
             ? data.patchRoots?.find(patch => patch.id === this.prRevisionPatchId)
@@ -5799,10 +5820,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   : "Pull request published and the referenced patch was closed."
             );
           } else {
-            alert("PR published to Nostr!");
+            alert("Pull request published.");
           }
         } catch(e) {
-          alert("Failed to sign/publish: " + e.message);
+          alert("Could not publish pull request: " + e.message);
         } finally {
           publishButton.disabled = false;
         }
@@ -5839,7 +5860,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const repoId = this.patchModalRepoId;
           const data = repoId ? this.nostrData[repoId] : null;
           if (!data?.announcement || !data.address) {
-            throw new Error("This repository has no Nostr announcement to attach the patch to.");
+            throw new Error("Collaboration has not been set up for this repository.");
           }
           const repositoryRelays = repositoryRelayUrls(data.announcement);
           const relayHint = repositoryRelays[0] || "";
@@ -5875,7 +5896,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             });
             if (wireBytes >= PATCH_EVENT_WIRE_LIMIT) {
               throw new Error(
-                `Patch ${index + 1} would produce an approximately ${wireBytes.toLocaleString()}-byte Nostr event after JSON escaping. Use a pull request.`
+                `Patch ${index + 1} would be approximately ${wireBytes.toLocaleString()} bytes after encoding; the encoded message must be under 60,000 bytes. Use a pull request for larger changes.`
               );
             }
           }
@@ -5904,7 +5925,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             const wireBytes = estimatedSignedEventBytes(eventTemplate);
             if (wireBytes >= PATCH_EVENT_WIRE_LIMIT) {
               throw new Error(
-                `Patch ${index + 1} would produce an approximately ${wireBytes.toLocaleString()}-byte Nostr event after JSON escaping. Use a pull request.`
+                `Patch ${index + 1} would be approximately ${wireBytes.toLocaleString()} bytes after encoding; the encoded message must be under 60,000 bytes. Use a pull request for larger changes.`
               );
             }
             const signedPatch = await nostrService.signAndPublish(eventTemplate, relayUrls);
@@ -5921,8 +5942,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           await this.refreshAllNostr();
           alert(
             published.length === 1
-              ? "Patch published to Nostr."
-              : `${published.length}-message patch set published to Nostr.`
+              ? "Patch published."
+              : `${published.length}-message patch set published.`
           );
         } catch (error) {
           if (published.length > 0) {
@@ -5931,7 +5952,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               `Published ${published.length} of ${payloads.length} patch messages. Publication stopped: ${error.message}`
             );
           } else {
-            alert("Failed to sign/publish patch: " + error.message);
+            alert("Could not publish patch: " + error.message);
           }
         } finally {
           publishButton.disabled = false;

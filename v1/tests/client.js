@@ -36,6 +36,16 @@ assert.doesNotMatch(
   /checkExtension\s*\(|nostrService\.checkExtension/,
   "anonymous initialization must not probe a NIP-07 signer"
 );
+assert.match(
+  html,
+  /<span>Browsing anonymously<\/span>[\s\S]*?id="nostr-sign-in-button"[\s\S]*?>Sign in<\/button>/,
+  "header must describe anonymous browsing and offer a concise sign-in action"
+);
+assert.doesNotMatch(
+  html,
+  /nos2x|quickStatusKind|quickStatusLabel|Connect a Nostr signer/,
+  "client UX must not claim an undetected provider or duplicate status actions"
+);
 assert.doesNotMatch(
   html,
   /\.flatMap\(repositoryRelayUrls\)/,
@@ -761,7 +771,7 @@ ok(
   && attributionLabel({
     ...directUserComment,
     pubkey: rootAuthor
-  }).includes("GitHub @alice (verified via NIP-39)")
+  }).includes("GitHub @alice (verified)")
   && !attributionHtml(bridgeIssue).includes("not-the-bridge-actor"),
   "verified GitHub identity enriches user bylines but never relabels bridge signatures"
 );
@@ -1132,6 +1142,33 @@ ok(
       );
     }
   }
+
+  const identityOriginalGetElementById = sandbox.document.getElementById;
+  const identityBadge = { textContent: "" };
+  const signInButton = { textContent: "", title: "" };
+  sandbox.document.getElementById = id => (
+    id === "user-badge"
+      ? identityBadge
+      : id === "nostr-sign-in-button"
+        ? signInButton
+        : null
+  );
+  clientNostrService.pubkey = owner;
+  clientNostrService.renderBadge();
+  const signedInStateIsClear =
+    identityBadge.textContent.startsWith("Signed in · ")
+    && signInButton.textContent === "Sign out";
+  await clientNostrService.toggleLogin();
+  ok(
+    signedInStateIsClear
+    && clientNostrService.pubkey === null
+    && identityBadge.textContent === "Browsing anonymously"
+    && signInButton.textContent === "Sign in"
+    && signInButton.title.includes("Nostr browser extension"),
+    "header sign-in toggles back to explicit page-level anonymous mode"
+  );
+  sandbox.document.getElementById = identityOriginalGetElementById;
+  clientNostrService.pubkey = owner;
 
   const closedService = new NostrService();
   closedService.ensureConnected = async () => {};

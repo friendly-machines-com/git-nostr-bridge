@@ -60,12 +60,20 @@ make a newer unauthorized state or status event override an authorized one.
 Removing a maintainer from the current announcement also removes that key's
 authority when cached state and statuses are evaluated again.
 
-After an explicit publish action connects the signer, repository relays remain
-the mandatory destinations. When current kind `10002` NIP-65 lists can be
-found through the already-known domain or repository relays, the client also
-publishes to the author's write relays and mentioned recipients' read relays.
-Those personal relays supplement the project rendezvous; they never replace or
-crowd its signed repository relays out of the bounded destination set.
+After the user signs in and explicitly chooses to publish, repository relays
+remain the mandatory destinations. When current kind `10002` NIP-65 lists can
+be found through the already-known domain or repository relays, the client
+also publishes to the author's write relays and mentioned recipients' read
+relays. Those personal relays supplement the project rendezvous; they never
+replace or crowd its signed repository relays out of the bounded destination
+set.
+
+The header starts in **Browsing anonymously** mode and does not contact a
+browser extension. **Sign in** uses the active account from a compatible Nostr
+browser extension. Once signed in, the same control becomes **Sign out**;
+signing out forgets the key in this page but does not modify the extension's
+own account or lock state. To use another key, sign out here, select it in the
+extension, and sign in again.
 
 ## Collection algebra
 
