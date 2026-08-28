@@ -351,6 +351,14 @@ ok(
   ]).length === 0,
   "relay collection rejects fragments, non-WebSocket URLs, and credentials"
 );
+ok(
+  normalizeRelayUrls(undefined).length === 0
+  && normalizeRelayUrls(null).length === 0
+  && normalizeRelayUrls("wss://not-an-array.example").length === 0
+  && repositoryRelayUrls(announcement, {}).length === 0
+  && domainDiscoveryRelayUrls({ relays: undefined }, {}).length === 0,
+  "missing or malformed optional relay collections reduce to an empty set"
+);
 
 const relaySettings = {
   version: 1,
@@ -1050,6 +1058,80 @@ ok(
     "only NIP-05 names._ and that key's relay hints anchor repository discovery"
   );
   verificationService.getDomainDocument = originalDomainDocumentLookup;
+
+  const bootstrapAnnouncement = {
+    id: "d".repeat(64),
+    pubkey: owner,
+    kind: 30617,
+    created_at: Math.floor(Date.now() / 1000) - 10,
+    tags: [
+      ["d", "dummy"],
+      ["name", "Dummy"],
+      ["description", "Bootstrap integration fixture"],
+      ["clone", "https://friendly-machines.com/git/dummy.git"],
+      ["web", "https://friendly-machines.com/git/#/repo/dummy"],
+      ["relays", "wss://repository.example"]
+    ],
+    content: "",
+    sig: "1".repeat(128)
+  };
+  const originalAuthorityLookup = verificationService.getDomainAuthority;
+  const originalNostrFetch = clientNostrService.fetchEvents;
+  const previousDomainDocument = verificationService.domainCache.get(
+    "friendly-machines.com"
+  );
+  storage.clear();
+  verificationService.domainCache.set("friendly-machines.com", {
+    names: { _: owner },
+    relays: { [owner]: ["wss://domain.example"] }
+  });
+  verificationService.getDomainAuthority = async () => ({
+    pubkey: owner,
+    relays: ["wss://domain.example"],
+    document: verificationService.domainCache.get("friendly-machines.com")
+  });
+  clientNostrService.fetchEvents = async filters => (
+    filters.some(filter => (
+      Array.isArray(filter.kinds) && filter.kinds.includes(30617)
+    ))
+      ? [bootstrapAnnouncement]
+      : []
+  );
+  try {
+    const bootstrapApp = new App();
+    bootstrapApp.repositories = [{
+      id: "dummy",
+      name: "dummy.git",
+      desc: "dummy Git Repository",
+      path: "dummy.git"
+    }];
+    await bootstrapApp.refreshAllNostr(false);
+    ok(
+      isNostrEventShape(bootstrapAnnouncement)
+      && bootstrapApp.nostrError === null
+      && bootstrapApp.discoveryRelayUrls.join(",")
+        === "wss://domain.example"
+      && bootstrapApp.nostrData.dummy?.announcement?.id
+        === bootstrapAnnouncement.id
+      && repositoryRelayUrls(
+        bootstrapApp.nostrData.dummy.announcement
+      ).join(",") === "wss://repository.example",
+      "empty-storage refresh follows NIP-05 discovery into a real-shaped repository announcement"
+    );
+  } finally {
+    verificationService.getDomainAuthority = originalAuthorityLookup;
+    clientNostrService.fetchEvents = originalNostrFetch;
+    clientNostrService.relayUrls = [];
+    storage.clear();
+    if (previousDomainDocument === undefined) {
+      verificationService.domainCache.delete("friendly-machines.com");
+    } else {
+      verificationService.domainCache.set(
+        "friendly-machines.com",
+        previousDomainDocument
+      );
+    }
+  }
 
   const closedService = new NostrService();
   closedService.ensureConnected = async () => {};
