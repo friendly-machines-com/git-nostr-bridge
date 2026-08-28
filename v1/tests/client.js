@@ -72,6 +72,16 @@ for (const [handler, label] of [
   );
 }
 assert.match(
+  html,
+  /onclick="app\.setRootStatus\([^>]+>Publish status<\/button>/,
+  "status publication must be labelled as publication"
+);
+assert.match(
+  html,
+  /onclick="app\.submitRootComment\([^>]+>Publish comment<\/button>/,
+  "comment publication must be labelled as publication"
+);
+assert.match(
   primaryMarkup,
   /Repository relays \(1–4, one per line\):[\s\S]*These relays store repository discussions and proposals/,
   "advanced relay settings must call relays by their actual name"

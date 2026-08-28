@@ -3073,7 +3073,7 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
         const displayDesc = uniqueTagValue(announcement, "description") || repo.desc;
 
         document.getElementById("repo-name-header").textContent = displayName;
-        document.getElementById("repo-desc-header").textContent = `${displayDesc} (Local: ./${repo.path})`;
+        document.getElementById("repo-desc-header").textContent = displayDesc;
 
         if (!loadGitObjects) {
           if (!isCurrentNavigation()) return false;
@@ -4412,7 +4412,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             }
             const linkedPrCount = this.pullRequestsForPatch(event, data).length;
             if (linkedPrCount > 0) {
-              details.push(`${linkedPrCount} linked ${linkedPrCount === 1 ? "PR" : "PRs"}`);
+              details.push(
+                `${linkedPrCount} linked ${linkedPrCount === 1 ? "pull request" : "pull requests"}`
+              );
             }
           }
           if (event.kind === 1618) {
@@ -5238,7 +5240,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             ? `<span class="badge badge-green" title="Repository ownership verified by ${escapeHtml(data.nip05)}">✓ Verified</span>`
             : announcement
               ? '<span class="badge badge-purple">Collaboration available</span>'
-              : '<span class="badge">Code only</span>';
+              : '<span class="badge">Collaboration not set up</span>';
         }
         const stars = Array.isArray(data.stars) ? data.stars : [];
         const starCount = new Set(
@@ -5542,7 +5544,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const displayName = uniqueTagValue(announcement, "name") || repo.name;
           const displayDesc = uniqueTagValue(announcement, "description") || repo.desc;
 
-          let provenanceBadge = '<span class="badge">Code only</span>';
+          let provenanceBadge = '<span class="badge">Collaboration not set up</span>';
           if (hasAnnouncement) {
             provenanceBadge = nip05
               ? `<span class="badge badge-green" title="Repository ownership verified by ${escapeHtml(nip05)}">✓ Verified</span>`
