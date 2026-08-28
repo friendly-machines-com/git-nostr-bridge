@@ -309,6 +309,13 @@ request.
 
 ## Git and browser-state correctness
 
+- Primary interface copy uses repository concepts—issues, pull requests,
+  patches, comments, statuses, branches, tags, and relays—without decorating
+  ordinary objects with NIP numbers or event kinds. Protocol identifiers stay
+  in source comments, advanced relay settings, diagnostics, and **Technical
+  details**. Controls that publish signed data are explicitly labelled
+  **Publish …**; controls that only open a form are labelled **New …**,
+  **Edit …**, or **Set up …**.
 - The visual theme follows the browser or operating-system light/dark
   preference. Both the authored palette and browser-provided controls use the
   selected color scheme; no client-side account or persistent override is
