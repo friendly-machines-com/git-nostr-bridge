@@ -11,6 +11,7 @@ const html = fs.readFileSync(
   path.join(__dirname, "..", "client", "index.html"),
   "utf8"
 );
+const primaryMarkup = html.slice(0, html.lastIndexOf("<script>"));
 assert.match(
   html,
   /<meta\s+name="color-scheme"\s+content="light dark"\s*\/>/,
@@ -47,9 +48,43 @@ assert.doesNotMatch(
   "client UX must not claim an undetected provider or duplicate status actions"
 );
 assert.doesNotMatch(
+  primaryMarkup,
+  /Nostr Issues|NIP-34 Issues|Nostr Pull Requests|Nostr Patches|Nostr State|State Broadcast|Ref Snapshot|Kind 16(?:17|18|19|21)|NIP-34 \/ NIP-22/,
+  "primary repository UI must not expose protocol qualifiers or event kinds"
+);
+assert.match(
+  primaryMarkup,
+  /Issues for this repository[\s\S]*Pull requests for this repository[\s\S]*Patches for this repository/,
+  "repository collaboration headings must preserve their user-facing context"
+);
+for (const [handler, label] of [
+  ["submitNewIssue", "Publish issue"],
+  ["submitNewPR", "Publish pull request"],
+  ["submitNewPatch", "Publish patch set"],
+  ["submitPrUpdate", "Publish pull request update"],
+  ["submitAnnouncement", "Publish collaboration settings"],
+  ["broadcastRepoState", "Publish branch and tag snapshot"]
+]) {
+  assert.match(
+    primaryMarkup,
+    new RegExp(`onclick="app\\.${handler}\\(\\)"[^>]*>${label}<\\/button>`),
+    `${handler} must have an explicit publish label`
+  );
+}
+assert.match(
+  primaryMarkup,
+  /Repository relays \(1–4, one per line\):[\s\S]*These relays store repository discussions and proposals/,
+  "advanced relay settings must call relays by their actual name"
+);
+assert.doesNotMatch(
   html,
   /\.flatMap\(repositoryRelayUrls\)/,
   "relay helper with optional settings must not receive Array callback arguments"
+);
+assert.doesNotMatch(
+  html,
+  /No Nostr issues|No Nostr pull requests|No Nostr root patches|Issue published to Nostr|PR published to Nostr|Patch published to Nostr|NIP-34 issue titles/,
+  "generated task copy must not leak redundant transport or protocol labels"
 );
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
   .filter(match => !/\bsrc\s*=/.test(match[1]));
