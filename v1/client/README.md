@@ -13,6 +13,60 @@ responses, or event arrival. An issue, one of its comments, and that
 comment's parent may become visible in any order and may be returned by
 different repository relays.
 
+## How repository discovery and permissions work
+
+Git repository names still come from the server's ordinary `projects.list`.
+For a repository such as `mobileapp.git`, the browser removes the `.git`
+suffix and looks for the NIP-34 repository identifier `mobileapp`.
+
+The browser then follows this bootstrap chain:
+
+1. Fetch `https://<this-domain>/.well-known/nostr.json?name=_`.
+2. Treat only `names._` as the domain's repository-announcement key.
+3. Read that key's optional NIP-05 `relays` entry and combine it with any
+   anonymous relay preferences saved locally by this browser.
+4. Ask those discovery relays for the exact signed event
+   `30617:<names._>:<repository-id>`.
+5. After accepting that announcement, use the relays inside its signed
+   `relays` tag for repository state, issues, patches, pull requests,
+   comments, and statuses.
+
+There is no globally hardcoded discovery relay in the client. The website's
+NIP-05 relay hints answer “where can I find this domain's announcements?”;
+each accepted repository announcement answers “where does this project
+collaborate?” Visitors may supplement or disable those hints under **Relay
+settings**, without logging in or exposing a Nostr identity. If discovery is
+not configured or is temporarily unavailable, ordinary anonymous Git browsing
+continues to work and the Nostr portion reports the problem.
+
+A correct Nostr signature proves which key authored an event; it does not give
+that key every repository permission. The client applies this model:
+
+- Only the domain key in `names._` can publish an effective repository
+  announcement for a hosted `projects.list` identifier.
+- Only current maintainers named by that accepted announcement can publish
+  effective kind `30618` branches and tags.
+- Anyone can open an issue, submit a patch or pull request, and participate in
+  its discussion.
+- Only a pull request's original author can publish its kind `1619` source-tip
+  updates.
+- In accordance with NIP-34, only the root issue/proposal author or a current
+  repository maintainer can publish its effective open, resolved/merged,
+  closed, or draft status.
+
+These checks are made while reducing received events, not merely while showing
+publication buttons. Consequently, a malicious relay or participant cannot
+make a newer unauthorized state or status event override an authorized one.
+Removing a maintainer from the current announcement also removes that key's
+authority when cached state and statuses are evaluated again.
+
+After an explicit publish action connects the signer, repository relays remain
+the mandatory destinations. When current kind `10002` NIP-65 lists can be
+found through the already-known domain or repository relays, the client also
+publishes to the author's write relays and mentioned recipients' read relays.
+Those personal relays supplement the project rendezvous; they never replace or
+crowd its signed repository relays out of the bounded destination set.
+
 ## Collection algebra
 
 The event's `tags` array is an ordered wire sequence because its exact order is
@@ -179,10 +233,12 @@ Discovery is deliberately staged: an announcement may appear after repository
 content, and an issue may appear after its comments. Each newly discovered
 level unlocks the next reference-based query during that poll or the next one.
 
-Repository collaboration is anchored only by the latest non-deleted 30617
-whose publisher appears in the deployed host's NIP-05 names map. The client
-does not accept an arbitrary announcement merely because its `d` tag matches a
-line in `projects.list`.
+Repository collaboration is anchored only by the latest non-deleted `30617`
+at the exact coordinate formed from the deployed host's NIP-05 `names._` key
+and the corresponding `projects.list` identifier. Other aliases in the
+NIP-05 `names` map do not gain repository authority. The client does not
+accept an arbitrary announcement merely because its `d` tag matches a line in
+`projects.list`.
 
 ## Limits outside the client's control
 

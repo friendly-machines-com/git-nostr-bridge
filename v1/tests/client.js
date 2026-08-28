@@ -26,6 +26,21 @@ assert.match(
   /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{/,
   "client must honor the browser or operating-system dark-mode preference"
 );
+assert.doesNotMatch(
+  html,
+  /const\s+DEFAULT_RELAYS|relay\.nostr\.band|["']wss:\/\/nos\.lol["']/,
+  "client must not ship universal hardcoded relay defaults"
+);
+assert.doesNotMatch(
+  html,
+  /checkExtension\s*\(|nostrService\.checkExtension/,
+  "anonymous initialization must not probe a NIP-07 signer"
+);
+assert.doesNotMatch(
+  html,
+  /\.flatMap\(repositoryRelayUrls\)/,
+  "relay helper with optional settings must not receive Array callback arguments"
+);
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
   .filter(match => !/\bsrc\s*=/.test(match[1]));
 assert.equal(scripts.length, 1, "expected one inline client script");
@@ -40,13 +55,15 @@ const expose = [
   "      App, NostrService, activeReplaceableEvents, actorLabel,",
   "      attributionHtml, attributionLabel, buildDeletionIndex, eventIsDeleted,",
   "      cloneUrlSetFromText, hasRepositoryOwnerTag,",
+  "      domainDiscoveryRelayUrls, effectiveRepositoryState,",
   "      githubNip39Claims, gistVerifiesNip39,",
   "      isNostrEventShape, isRepositoryStarReaction,",
   "      isValidNip34CollaborationEvent, repositoryStarIdentity,",
   "      repositoryUnstarTags,",
   "      latestAddressableEvents, latestReplaceableEvents, normalizeRelayUrls,",
-  "      nip65WriteRelays,",
-  "      repositoryEarliestUniqueCommit, repositoryStateMap, scalarTagValues,",
+  "      nip65ReadRelays, nip65WriteRelays,",
+  "      repositoryEarliestUniqueCommit, repositoryRelayUrls,",
+  "      repositoryStateMap, scalarTagValues,",
   "      uniqueNip22EventReference, uniqueTagValue,",
   "      externalIdentityService, nostrService, verificationService",
   "    };"
@@ -117,6 +134,8 @@ const {
   attributionLabel,
   buildDeletionIndex,
   cloneUrlSetFromText,
+  domainDiscoveryRelayUrls,
+  effectiveRepositoryState,
   eventIsDeleted,
   externalIdentityService,
   githubNip39Claims,
@@ -127,9 +146,11 @@ const {
   isValidNip34CollaborationEvent,
   latestAddressableEvents,
   latestReplaceableEvents,
+  nip65ReadRelays,
   nip65WriteRelays,
   normalizeRelayUrls,
   repositoryEarliestUniqueCommit,
+  repositoryRelayUrls,
   repositoryStateMap,
   repositoryStarIdentity,
   repositoryUnstarTags,
@@ -331,6 +352,36 @@ ok(
   "relay collection rejects fragments, non-WebSocket URLs, and credentials"
 );
 
+const relaySettings = {
+  version: 1,
+  additionalRelays: ["wss://additional.example"],
+  discoveryRelays: ["wss://directory.example"],
+  disabledRelays: ["wss://disabled.example"]
+};
+ok(
+  domainDiscoveryRelayUrls({
+    pubkey: owner,
+    relays: ["wss://domain.example", "wss://disabled.example"]
+  }, relaySettings).join(",")
+    === [
+      "wss://domain.example",
+      "wss://directory.example",
+      "wss://additional.example"
+    ].join(",")
+  && repositoryRelayUrls({
+    ...announcement,
+    tags: [
+      ...announcement.tags,
+      ["relays", "wss://repository.example", "wss://disabled.example"]
+    ]
+  }, relaySettings).join(",")
+    === [
+      "wss://repository.example",
+      "wss://additional.example"
+    ].join(","),
+  "domain discovery and repository collaboration relays remain separate roles"
+);
+
 ok(
   cloneUrlSetFromText("https://z.example/x.git\nhttps://a.example/x.git\nhttps://z.example/x.git")
     .join(",") === "https://a.example/x.git,https://z.example/x.git",
@@ -384,6 +435,12 @@ const validStatus = {
     ["p", rootAuthor]
   ]
 };
+const unauthorizedNewerStatus = {
+  ...validStatus,
+  id: "5".repeat(64),
+  pubkey: attacker,
+  created_at: 999
+};
 ok(
   app.statusEventFor(root, {
     announcement,
@@ -391,9 +448,33 @@ ok(
   }) === null
   && app.statusEventFor(root, {
     announcement,
-    statuses: [malformedStatus, validStatus]
+    statuses: [malformedStatus, validStatus, unauthorizedNewerStatus]
   })?.id === validStatus.id,
-  "malformed status hint slots cannot satisfy required p tags"
+  "malformed or unauthorized newer statuses cannot shadow a root-author status"
+);
+
+const maintainerStatus = {
+  ...validStatus,
+  id: "6".repeat(64),
+  pubkey: maintainer,
+  created_at: 130
+};
+const revokedAnnouncement = {
+  ...announcement,
+  id: "7".repeat(64),
+  created_at: 200,
+  tags: [["d", "dummy"]]
+};
+ok(
+  app.statusEventFor(root, {
+    announcement,
+    statuses: [validStatus, maintainerStatus]
+  })?.id === maintainerStatus.id
+  && app.statusEventFor(root, {
+    announcement: revokedAnnouncement,
+    statuses: [maintainerStatus]
+  }) === null,
+  "current maintainers may set status and revoked maintainers may not"
 );
 
 const parent = {
@@ -605,8 +686,20 @@ ok(
   })) === JSON.stringify([
     "wss://both.example",
     "wss://write.example"
+  ])
+  && JSON.stringify(nip65ReadRelays({
+    ...nip39TieLow,
+    kind: 10002,
+    tags: [
+      ["r", "wss://write.example", "write"],
+      ["r", "wss://both.example"],
+      ["r", "wss://read.example", "read"]
+    ]
+  })) === JSON.stringify([
+    "wss://both.example",
+    "wss://read.example"
   ]),
-  "NIP-65 identity discovery uses the canonical write-relay set"
+  "NIP-65 routing separates canonical author-write and recipient-read sets"
 );
 
 const claimedNpub = "npub1example";
@@ -720,6 +813,34 @@ ok(
     tags: [[stateRef, stateCommitB], [stateRef, stateCommitA]]
   }) === null,
   "repository state is a ref map and conflicting values never use tag order"
+);
+
+const authorizedState = {
+  id: "8".repeat(64),
+  pubkey: maintainer,
+  kind: 30618,
+  created_at: 200,
+  tags: [["d", "dummy"], [stateRef, stateCommitA]]
+};
+const unauthorizedNewerState = {
+  ...authorizedState,
+  id: "9".repeat(64),
+  pubkey: attacker,
+  created_at: 999,
+  tags: [["d", "dummy"], [stateRef, stateCommitB]]
+};
+ok(
+  effectiveRepositoryState(
+    [authorizedState, unauthorizedNewerState],
+    announcement,
+    buildDeletionIndex([])
+  )?.id === authorizedState.id
+  && effectiveRepositoryState(
+    [authorizedState],
+    revokedAnnouncement,
+    buildDeletionIndex([])
+  ) === null,
+  "unauthorized newer state cannot shadow authorized state and revocation is immediate"
 );
 
 const patchRoot = {
@@ -907,6 +1028,28 @@ ok(
     "NIP-05 alias map uses a deterministic display representative"
   );
   verificationService.getDomainPubkeys = originalDomainLookup;
+
+  const originalDomainDocumentLookup =
+    verificationService.getDomainDocument.bind(verificationService);
+  verificationService.getDomainDocument = async () => ({
+    names: {
+      _: owner,
+      dannym: attacker
+    },
+    relays: {
+      [owner]: ["wss://domain.example"],
+      [attacker]: ["wss://attacker.example"]
+    }
+  });
+  const domainAuthority = await verificationService.getDomainAuthority(
+    "friendly-machines.com"
+  );
+  ok(
+    domainAuthority.pubkey === owner
+    && domainAuthority.relays.join(",") === "wss://domain.example",
+    "only NIP-05 names._ and that key's relay hints anchor repository discovery"
+  );
+  verificationService.getDomainDocument = originalDomainDocumentLookup;
 
   const closedService = new NostrService();
   closedService.ensureConnected = async () => {};

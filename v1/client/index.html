@@ -1,4 +1,15 @@
 <!DOCTYPE html>
+<!--
+  NIP-34 bootstrap and permissions:
+  HTTPS origin -> NIP-05 names._ key and its relay hints -> exact signed
+  30617:<key>:<projects.list-id> announcement -> that announcement's project
+  relays and current maintainers. This chain is used because Nostr has no
+  universal event-location DHT and a signature identifies its author without
+  granting repository authority. Only the domain key may announce a hosted
+  repository; only current maintainers may publish effective 30618 refs;
+  anyone may propose or discuss; only a root author or current maintainer may
+  set that root's NIP-34 status. See client/README.md for the full model.
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -426,6 +437,7 @@
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
           <span id="nostr-refresh-status" style="color:var(--text-muted); font-size:0.85rem;"></span>
+          <button class="btn" onclick="app.openRelaySettings()">Relay settings…</button>
           <button id="nostr-refresh-button" class="btn btn-primary" onclick="app.refreshAllNostr()">⚡ Refresh Nostr Relays</button>
         </div>
       </div>
@@ -700,6 +712,39 @@
     </div>
   </div>
 
+  <!-- MODAL: ORIGIN-LOCAL RELAY SETTINGS -->
+  <div id="relay-settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 style="margin-bottom:4px;">Nostr relay settings</h3>
+      <p class="form-help" style="margin-bottom:12px;">
+        These anonymous, origin-local preferences supplement the domain and
+        repository relay hints. They stay in this browser.
+      </p>
+      <div id="relay-authority-summary" class="proposal-target" style="margin-bottom:12px;"></div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div class="form-field">
+          <label for="relay-additional">Additional relays</label>
+          <textarea id="relay-additional" rows="3" spellcheck="false"></textarea>
+          <div class="form-help">Queried in addition to both domain discovery and repository relays.</div>
+        </div>
+        <div class="form-field">
+          <label for="relay-discovery">Additional announcement-discovery relays</label>
+          <textarea id="relay-discovery" rows="3" spellcheck="false"></textarea>
+          <div class="form-help">Used only to locate the domain authority’s exact kind-30617 repository announcements.</div>
+        </div>
+        <div class="form-field">
+          <label for="relay-disabled">Disabled relays</label>
+          <textarea id="relay-disabled" rows="3" spellcheck="false"></textarea>
+          <div class="form-help">Overrides NIP-05, repository, and local relay hints on this origin.</div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button class="btn" onclick="document.getElementById('relay-settings-modal').classList.add('hidden')">Cancel</button>
+          <button class="btn btn-primary" onclick="app.saveRelaySettings()">Save and refresh</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <!-- MODAL: ANNOUNCE / EDIT REPO (KIND 30617) -->
   <div id="publish-modal" class="modal hidden">
     <div class="modal-content">
@@ -727,7 +772,7 @@
         </div>
 
         <div>
-          <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Nostr relays (2–4, one per line):</label>
+          <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:4px;">Repository relays (1–4, one per line):</label>
           <textarea id="pub-repo-relays" rows="3" style="width:100%;" spellcheck="false"></textarea>
           <div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">
             The client tries every listed relay. One acknowledgement publishes
@@ -746,13 +791,32 @@
   </div>
 
   <script>
+    /*
+     * NIP-34 BOOTSTRAP AND PERMISSION MODEL
+     *
+     * The HTTPS origin is the bootstrap trust anchor. Its NIP-05 document
+     * names exactly one repository-announcement authority in `names._` and
+     * supplies relay hints for that key. For each unchanged projects.list
+     * identifier, the client queries those hints for the exact coordinate
+     * `30617:<names._>:<repository-id>`. After accepting that signed
+     * announcement, its `relays` tag becomes the repository collaboration
+     * rendezvous. Domain discovery relays and repository relays are different
+     * roles; neither is a universal hardcoded Nostr relay.
+     *
+     * A valid signature identifies an event author but does not by itself
+     * grant repository authority. Only names._ may announce a hosted
+     * repository. Only current maintainers from that accepted announcement
+     * may publish effective kind-30618 branch/tag state. Anyone may submit an
+     * issue, patch, pull request, or comment. Under NIP-34, only the root-event
+     * author or a current repository maintainer may publish its effective
+     * status. Every reducer applies these permission checks after signature,
+     * reference, replacement, and deletion validation, so a newer
+     * unauthorized event can never shadow an older authorized one.
+     */
+
     // ==========================================
     // 1. PERSISTENT NOSTR RELAY POOL
     // ==========================================
-    const DEFAULT_RELAYS = [
-      "wss://nos.lol",
-      "wss://relay.nostr.band"
-    ];
     // Public deployment trust anchor, not a secret. It prevents an arbitrary
     // event carrying a self-chosen gh_user tag from being labelled as the
     // Friendly Machines bridge.
@@ -760,6 +824,7 @@
       "1443e05c05a0f7141c7430d3dd6da7dcd0905ab49ae5ecf9c82243823fdc3ef1";
     const RELAY_QUERY_LIMIT = 5000;
     const EVENT_CACHE_KEY = "nostrgit:nip34-events:v2";
+    const RELAY_SETTINGS_KEY = "nostrgit:relay-settings:v1";
     const NIP34_STATUS_KINDS = Object.freeze([1630, 1631, 1632, 1633]);
     const NIP34_STATUS_KIND_SET = new Set(NIP34_STATUS_KINDS);
     const NIP39_EXTERNAL_IDENTITIES_KIND = 10011;
@@ -1110,23 +1175,31 @@
         && file.content === nip39GithubProofText(npub);
     }
 
-    function nip65WriteRelays(event) {
+    function nip65Relays(event, mode) {
       if (event?.kind !== NIP65_RELAY_LIST_KIND) return [];
       return normalizeRelayUrls((event.tags || [])
         .filter(tag => (
           Array.isArray(tag)
           && tag[0] === "r"
           && typeof tag[1] === "string"
-          && (tag.length < 3 || tag[2] === "write")
+          && (tag.length < 3 || tag[2] === mode)
         ))
         .map(tag => tag[1]))
         .slice(0, NIP65_RELAYS_PER_AUTHOR);
     }
 
+    function nip65WriteRelays(event) {
+      return nip65Relays(event, "write");
+    }
+
+    function nip65ReadRelays(event) {
+      return nip65Relays(event, "read");
+    }
+
     function nip05IdentityLabel(pubkey) {
       const names = verificationService.domainCache.get(
         window.location.hostname
-      ) || {};
+      )?.names || {};
       const aliases = Object.entries(names)
         .filter(([name, value]) => (
           name !== "_"
@@ -1296,11 +1369,70 @@
       return Array.from(relays).sort().slice(0, 12);
     }
 
-    function repositoryRelayUrls(announcement) {
-      return normalizeRelayUrls([
-        ...DEFAULT_RELAYS,
-        ...tagValues(announcement, "relays")
-      ]);
+    function relayUrlsFromText(value) {
+      const tokens = sortedUniqueStrings(
+        String(value || "").split(/\s+/).filter(Boolean)
+      );
+      const invalid = tokens.filter(token => normalizeRelayUrls([token]).length === 0);
+      if (invalid.length > 0) {
+        throw new Error(`Invalid secure WebSocket relay URL: ${invalid[0]}`);
+      }
+      return normalizeRelayUrls(tokens);
+    }
+
+    function normalizeRelaySettings(value) {
+      const input = value && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : {};
+      return {
+        version: 1,
+        additionalRelays: normalizeRelayUrls(input.additionalRelays || []),
+        discoveryRelays: normalizeRelayUrls(input.discoveryRelays || []),
+        disabledRelays: normalizeRelayUrls(input.disabledRelays || [])
+      };
+    }
+
+    function loadRelaySettings() {
+      try {
+        return normalizeRelaySettings(
+          JSON.parse(localStorage.getItem(RELAY_SETTINGS_KEY) || "{}")
+        );
+      } catch (_) {
+        return normalizeRelaySettings({});
+      }
+    }
+
+    function prioritizedRelayUrls(groups, settings = loadRelaySettings()) {
+      settings = normalizeRelaySettings(settings);
+      const disabled = new Set(settings.disabledRelays);
+      const relays = [];
+      const seen = new Set();
+      for (const group of groups) {
+        for (const relay of normalizeRelayUrls(group)) {
+          if (disabled.has(relay) || seen.has(relay)) continue;
+          seen.add(relay);
+          relays.push(relay);
+          if (relays.length === 12) return relays;
+        }
+      }
+      return relays;
+    }
+
+    function domainDiscoveryRelayUrls(authority, settings = loadRelaySettings()) {
+      settings = normalizeRelaySettings(settings);
+      return prioritizedRelayUrls([
+        authority?.relays || [],
+        settings.discoveryRelays,
+        settings.additionalRelays
+      ], settings);
+    }
+
+    function repositoryRelayUrls(announcement, settings = loadRelaySettings()) {
+      settings = normalizeRelaySettings(settings);
+      return prioritizedRelayUrls([
+        tagValues(announcement, "relays"),
+        settings.additionalRelays
+      ], settings);
     }
 
     function isNostrEventShape(event) {
@@ -1372,6 +1504,24 @@
         }
       }
       return Array.from(latest.values());
+    }
+
+    function effectiveRepositoryState(events, announcement, deletionIndex) {
+      if (!announcement) return null;
+      const identifier = uniqueTagValue(announcement, "d");
+      if (identifier === null) return null;
+      return latestAddressableEvents(events)
+        .filter(event => (
+          event.kind === 30618
+          && uniqueTagValue(event, "d") === identifier
+          && !eventIsDeleted(event, deletionIndex)
+          && repositoryStateMap(event) !== null
+          && verificationService.isAuthorizedState(event, announcement)
+        ))
+        .sort((a, b) => (
+          b.created_at - a.created_at
+          || a.id.localeCompare(b.id)
+        ))[0] || null;
     }
 
     function latestReplaceableEvents(events, kind) {
@@ -1474,7 +1624,7 @@
     class NostrService {
       constructor() {
         this.pubkey = null;
-        this.relayUrls = DEFAULT_RELAYS;
+        this.relayUrls = [];
         this.sockets = new Map();
         this.connecting = new Map();
         this.activeSubs = new Map();
@@ -1580,24 +1730,6 @@
         } catch (err) {}
       }
 
-      async checkExtension(retries = 5, delay = 100) {
-        for (let i = 0; i < retries; i++) {
-          if (window.nostr) {
-            try {
-              const pubkey = await window.nostr.getPublicKey();
-              if (!HEX_64.test(pubkey || "")) throw new Error("Signer returned an invalid public key");
-              this.pubkey = pubkey.toLowerCase();
-              this.renderBadge();
-              return true;
-            } catch (e) {
-              return false;
-            }
-          }
-          await new Promise(r => setTimeout(r, delay));
-        }
-        return false;
-      }
-
       async login(userInitiated = false) {
         if (!window.nostr) {
           if (userInitiated) alert("Nostr extension not detected.");
@@ -1631,6 +1763,10 @@
         relayUrls = this.relayUrls,
         recordWarnings = true
       ) {
+        relayUrls = normalizeRelayUrls(relayUrls);
+        if (relayUrls.length === 0) {
+          throw new Error("No Nostr relay is configured for this query.");
+        }
         if (typeof window.NostrTools?.verifyEvent !== "function") {
           throw new Error("Nostr signature verifier failed to load.");
         }
@@ -1738,6 +1874,10 @@
         relayUrls = this.relayUrls,
         minimumAcknowledgements = 1
       ) {
+        relayUrls = normalizeRelayUrls(relayUrls);
+        if (relayUrls.length === 0) {
+          throw new Error("No Nostr relay is configured for publication.");
+        }
         if (this.publishInProgress) {
           throw new Error("Another Nostr publication is already in progress.");
         }
@@ -1865,12 +2005,12 @@
         this.domainCache = new Map();
       }
 
-      async getDomainPubkeys(domain = window.location.hostname, forceRefresh = false) {
+      async getDomainDocument(domain = window.location.hostname, forceRefresh = false) {
         if (!forceRefresh && this.domainCache.has(domain)) return this.domainCache.get(domain);
         try {
           const res = await fetchWithTimeout(
-            `https://${domain}/.well-known/nostr.json`,
-            { cache: "no-store" },
+            `https://${domain}/.well-known/nostr.json?name=_`,
+            { cache: "no-store", redirect: "error" },
             5000
           );
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1880,11 +2020,40 @@
             && !Array.isArray(data.names)
             ? data.names
             : {};
-          this.domainCache.set(domain, names);
-          return names;
+          const relays = data
+            && typeof data.relays === "object"
+            && !Array.isArray(data.relays)
+            ? data.relays
+            : {};
+          const document = { names, relays };
+          this.domainCache.set(domain, document);
+          return document;
         } catch (e) {
-          return this.domainCache.get(domain) || {};
+          return this.domainCache.get(domain) || { names: {}, relays: {} };
         }
+      }
+
+      async getDomainPubkeys(domain = window.location.hostname, forceRefresh = false) {
+        return (await this.getDomainDocument(domain, forceRefresh)).names;
+      }
+
+      async getDomainAuthority(domain = window.location.hostname, forceRefresh = false) {
+        const document = await this.getDomainDocument(domain, forceRefresh);
+        const root = typeof document.names._ === "string"
+          ? document.names._.toLowerCase()
+          : "";
+        if (!HEX_64.test(root)) {
+          return { pubkey: null, relays: [], document };
+        }
+        const relayEntry = Object.entries(document.relays)
+          .find(([pubkey]) => pubkey.toLowerCase() === root);
+        return {
+          pubkey: root,
+          relays: normalizeRelayUrls(
+            Array.isArray(relayEntry?.[1]) ? relayEntry[1] : []
+          ),
+          document
+        };
       }
 
       async verifyNip05(pubkey, domain = window.location.hostname) {
@@ -1898,6 +2067,7 @@
           ))
           .map(([name]) => name)
           .sort();
+        if (aliases.includes("_")) return domain;
         return aliases.length > 0 ? `${aliases[0]}@${domain}` : null;
       }
 
@@ -1917,7 +2087,25 @@
 
       isAuthorizedState(stateEvent, announcementEvent) {
         if (!stateEvent || !announcementEvent) return false;
-        return this.maintainerPubkeys(announcementEvent).has(stateEvent.pubkey.toLowerCase());
+        return stateEvent.kind === 30618
+          && uniqueTagValue(stateEvent, "d") === uniqueTagValue(announcementEvent, "d")
+          && this.maintainerPubkeys(announcementEvent)
+            .has(stateEvent.pubkey.toLowerCase());
+      }
+
+      statusAuthorPubkeys(rootEvent, announcementEvent) {
+        const authors = this.maintainerPubkeys(announcementEvent);
+        if (HEX_64.test(rootEvent?.pubkey || "")) {
+          authors.add(rootEvent.pubkey.toLowerCase());
+        }
+        return authors;
+      }
+
+      isAuthorizedStatus(statusEvent, rootEvent, announcementEvent) {
+        return !!statusEvent
+          && NIP34_STATUS_KIND_SET.has(statusEvent.kind)
+          && this.statusAuthorPubkeys(rootEvent, announcementEvent)
+            .has(statusEvent.pubkey.toLowerCase());
       }
     }
 
@@ -2317,7 +2505,9 @@ async loadRepoOnce(repoPath) {
         this.commentDrafts = new Map();
         this.nostrEventCache = this.loadEventCache();
         this.nostrPollTimer = null;
-        this.externalIdentityRelayUrls = DEFAULT_RELAYS;
+        this.externalIdentityRelayUrls = [];
+        this.domainAuthority = null;
+        this.discoveryRelayUrls = [];
         this.externalIdentityRefresh = null;
         this.externalIdentityRefreshPending = false;
         this.navigationGeneration = 0;
@@ -2395,6 +2585,90 @@ async loadRepoOnce(repoPath) {
         this.cacheEvents(deletions);
       }
 
+      async nip65HeadsForAuthors(pubkeys, relayUrls) {
+        const authors = sortedUniqueStrings(pubkeys
+          .filter(pubkey => HEX_64.test(pubkey || ""))
+          .map(pubkey => pubkey.toLowerCase()))
+          .slice(0, 16);
+        if (authors.length === 0) return new Map();
+        const authorSet = new Set(authors);
+        const queryRelays = normalizeRelayUrls(relayUrls);
+
+        if (queryRelays.length > 0) {
+          try {
+            const fresh = await nostrService.fetchEvents([
+              {
+                kinds: [NIP65_RELAY_LIST_KIND],
+                authors
+              }
+            ], 2500, queryRelays, false);
+            this.cacheEvents(fresh);
+          } catch (_) {
+            // NIP-65 is supplementary routing. Repository publication still
+            // proceeds when a personal relay list cannot be refreshed.
+          }
+        }
+
+        const candidates = this.cachedEvents(event => (
+          event.kind === NIP65_RELAY_LIST_KIND
+          && authorSet.has(event.pubkey.toLowerCase())
+        ));
+        if (queryRelays.length > 0 && candidates.length > 0) {
+          try {
+            await this.fetchDeletionRequests(
+              candidates.map(event => event.id),
+              [],
+              queryRelays,
+              false
+            );
+          } catch (_) {}
+        }
+        const deletionIndex = buildDeletionIndex(
+          this.cachedEvents(event => event.kind === 5)
+        );
+        return new Map(activeReplaceableEvents(
+          candidates,
+          NIP65_RELAY_LIST_KIND,
+          deletionIndex
+        ).map(event => [event.pubkey.toLowerCase(), event]));
+      }
+
+      async publicationRelayUrls(announcement, recipientPubkeys = []) {
+        const repositoryRelays = repositoryRelayUrls(announcement);
+        if (repositoryRelays.length === 0) {
+          throw new Error("This repository has no enabled collaboration relay.");
+        }
+        if (!nostrService.pubkey && !await nostrService.login(false)) {
+          throw new Error("Connect a Nostr signer first.");
+        }
+        const author = nostrService.pubkey?.toLowerCase() || null;
+        const recipients = sortedUniqueStrings(recipientPubkeys
+          .filter(pubkey => HEX_64.test(pubkey || ""))
+          .map(pubkey => pubkey.toLowerCase()));
+        const relayListAuthors = [
+          ...(author ? [author] : []),
+          ...recipients
+        ];
+        const heads = await this.nip65HeadsForAuthors(
+          relayListAuthors,
+          [
+            ...repositoryRelays,
+            ...this.discoveryRelayUrls
+          ]
+        );
+        const authorWriteRelays = author
+          ? nip65WriteRelays(heads.get(author))
+          : [];
+        const recipientReadRelays = recipients.flatMap(pubkey => (
+          nip65ReadRelays(heads.get(pubkey))
+        ));
+        return prioritizedRelayUrls([
+          repositoryRelays,
+          authorWriteRelays,
+          recipientReadRelays
+        ]);
+      }
+
       visibleAttributionPubkeys() {
         const pubkeys = [];
         for (const data of Object.values(this.nostrData)) {
@@ -2469,13 +2743,9 @@ async loadRepoOnce(repoPath) {
           NIP65_RELAY_LIST_KIND,
           relayListDeletionIndex
         );
-        const defaultIdentityRelays = normalizeRelayUrls(DEFAULT_RELAYS);
-        const collaborationRelays = normalizeRelayUrls([
-          ...defaultIdentityRelays,
-          ...normalizeRelayUrls(this.externalIdentityRelayUrls)
-            .filter(relay => !defaultIdentityRelays.includes(relay))
-            .slice(0, Math.max(0, 8 - defaultIdentityRelays.length))
-        ]);
+        const collaborationRelays = normalizeRelayUrls(
+          this.externalIdentityRelayUrls
+        ).slice(0, 8);
         const personalRelays = normalizeRelayUrls(
           relayListHeads.flatMap(nip65WriteRelays)
         ).filter(relay => !collaborationRelays.includes(relay));
@@ -2596,7 +2866,6 @@ async loadRepoOnce(repoPath) {
         }
 
         this.renderOverview();
-        nostrService.checkExtension();
         const nostrRefresh = this.refreshAllNostr();
         await this.route();
         await nostrRefresh;
@@ -3199,41 +3468,69 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const repoIds = this.repositories.map(repo => repo.id);
           const repoIdSet = new Set(repoIds);
           const hostDomain = window.location.hostname;
-          const domainPubkeys = await verificationService.getDomainPubkeys(hostDomain, forceNip05);
-          const trustedHostPubkeys = new Set(
-            Object.values(domainPubkeys)
-              .filter(pubkey => typeof pubkey === "string" && HEX_64.test(pubkey))
-              .map(pubkey => pubkey.toLowerCase())
+          const domainAuthority = await verificationService.getDomainAuthority(
+            hostDomain,
+            forceNip05
           );
+          const trustedHostPubkey = domainAuthority.pubkey;
+          const discoveryRelays = domainDiscoveryRelayUrls(domainAuthority);
+          this.domainAuthority = domainAuthority;
+          this.discoveryRelayUrls = discoveryRelays;
+          nostrService.relayUrls = discoveryRelays;
 
-          try {
-            const freshMetadata = await nostrService.fetchEvents([
-              { kinds: [30617, 30618], "#d": repoIds }
-            ], 4000);
-            this.cacheEvents(freshMetadata);
-          } catch (error) {
-            fetchErrors.push(error.message || "metadata relay query failed");
+          if (!trustedHostPubkey) {
+            fetchErrors.push(
+              `NIP-05 names._ does not contain a valid repository authority for ${hostDomain}`
+            );
+          } else if (discoveryRelays.length === 0) {
+            fetchErrors.push(
+              `NIP-05 supplies no usable discovery relays for ${hostDomain}`
+            );
+          } else {
+            try {
+              const freshAnnouncements = await nostrService.fetchEvents([
+                {
+                  kinds: [30617],
+                  authors: [trustedHostPubkey],
+                  "#d": repoIds
+                }
+              ], 4000, discoveryRelays);
+              this.cacheEvents(freshAnnouncements);
+            } catch (error) {
+              fetchErrors.push(
+                error.message || "repository announcement discovery failed"
+              );
+            }
           }
+
           let metadataEvents = this.cachedEvents(event => (
             (event.kind === 30617 || event.kind === 30618)
             && repoIdSet.has(uniqueTagValue(event, "d"))
           ));
           let metadataHeads = latestAddressableEvents(metadataEvents);
-          let collaborationRelays = normalizeRelayUrls([
-            ...DEFAULT_RELAYS,
-            ...metadataHeads
-              .filter(event => event.kind === 30617)
-              .flatMap(event => tagValues(event, "relays"))
-          ]);
+          let acceptedAnnouncementHeads = metadataHeads.filter(event => (
+            event.kind === 30617
+            && trustedHostPubkey !== null
+            && event.pubkey.toLowerCase() === trustedHostPubkey
+          ));
+          let collaborationRelays = normalizeRelayUrls(
+            acceptedAnnouncementHeads.flatMap(event => (
+              repositoryRelayUrls(event)
+            ))
+          );
 
-          // Announcements are discovered on the default relay first. Once
-          // their repository relay set is known, refresh addressable metadata
-          // there too so a state or replacement need not be copied to the
-          // default relay to become visible.
-          if (collaborationRelays.some(relay => !DEFAULT_RELAYS.includes(relay))) {
+          // The domain relays locate only exact repository announcements.
+          // Repository state and collaboration move to the relay set signed
+          // into those accepted announcements.
+          if (collaborationRelays.length > 0 && trustedHostPubkey) {
             try {
               const repositoryMetadata = await nostrService.fetchEvents([
-                { kinds: [30617, 30618], "#d": repoIds }
+                {
+                  kinds: [30617],
+                  authors: [trustedHostPubkey],
+                  "#d": repoIds
+                },
+                { kinds: [30618], "#d": repoIds }
               ], 4000, collaborationRelays);
               this.cacheEvents(repositoryMetadata);
             } catch (error) {
@@ -3244,25 +3541,30 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               && repoIdSet.has(uniqueTagValue(event, "d"))
             ));
             metadataHeads = latestAddressableEvents(metadataEvents);
-            collaborationRelays = normalizeRelayUrls([
-              ...DEFAULT_RELAYS,
-              ...metadataHeads
-                .filter(event => event.kind === 30617)
-                .flatMap(event => tagValues(event, "relays"))
-            ]);
+            acceptedAnnouncementHeads = metadataHeads.filter(event => (
+              event.kind === 30617
+              && event.pubkey.toLowerCase() === trustedHostPubkey
+            ));
+            collaborationRelays = normalizeRelayUrls(
+              acceptedAnnouncementHeads.flatMap(event => (
+                repositoryRelayUrls(event)
+              ))
+            );
           }
-          this.externalIdentityRelayUrls = collaborationRelays;
+          this.externalIdentityRelayUrls = normalizeRelayUrls([
+            ...collaborationRelays,
+            ...discoveryRelays
+          ]);
 
           // NIP-09 lookups are reference-based too. Known metadata supplies
-          // exact coordinates; NIP-05 publisher keys also let us discover an
+          // exact coordinates; the NIP-05 root key also lets us discover an
           // address tombstone even when the deleted announcement is absent.
           const metadataCoordinates = metadataEvents
             .map(addressableCoordinate)
             .filter(Boolean);
           for (const repoId of repoIds) {
-            for (const pubkey of trustedHostPubkeys) {
-              metadataCoordinates.push(`30617:${pubkey}:${repoId}`);
-              metadataCoordinates.push(`30618:${pubkey}:${repoId}`);
+            if (trustedHostPubkey) {
+              metadataCoordinates.push(`30617:${trustedHostPubkey}:${repoId}`);
             }
           }
           for (const announcement of metadataEvents.filter(event => event.kind === 30617)) {
@@ -3275,7 +3577,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
           const candidateAnnouncements = metadataHeads.filter(event => (
             event.kind === 30617
-            && trustedHostPubkeys.has(event.pubkey.toLowerCase())
+            && trustedHostPubkey !== null
+            && event.pubkey.toLowerCase() === trustedHostPubkey
           ));
           const announcementByAddress = new Map(
             candidateAnnouncements.map(event => [
@@ -3413,6 +3716,23 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             && rootIdSetAll.has(uniqueTagValue(event, "E"))
           ));
 
+          // Announcement/state tombstones may live on either the domain
+          // discovery relays or the repository relays. Keep this metadata
+          // lookup separate so ordinary collaboration references are not
+          // unnecessarily sent to discovery-only relays.
+          try {
+            await this.fetchDeletionRequests(
+              [],
+              metadataCoordinates,
+              normalizeRelayUrls([
+                ...discoveryRelays,
+                ...collaborationRelays
+              ])
+            );
+          } catch (error) {
+            fetchErrors.push(error.message || "metadata deletion query failed");
+          }
+
           // A target and its deletion request may arrive in either order.
           // Once any target is known, query its exact ID and keep every valid
           // deletion request so a later relay copy cannot resurrect it.
@@ -3429,7 +3749,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   ...prUpdates
                 ].map(event => event.id)
               ],
-              metadataCoordinates,
+              [],
               collaborationRelays
             );
           } catch (error) {
@@ -3441,11 +3761,6 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           const announcements = metadataHeads.filter(event => (
             event.kind === 30617 && !eventIsDeleted(event, deletionIndex)
-          ));
-          const states = metadataHeads.filter(event => (
-            event.kind === 30618
-            && !eventIsDeleted(event, deletionIndex)
-            && repositoryStateMap(event) !== null
           ));
           const visibleRootEvents = rootEvents.filter(event => (
             !eventIsDeleted(event, deletionIndex)
@@ -3468,18 +3783,16 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               .filter(event => uniqueTagValue(event, "d") === repo.id)
               .sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id));
             const trustedAnnouncements = repoAnnouncements.filter(event => (
-              trustedHostPubkeys.has(event.pubkey.toLowerCase())
+              trustedHostPubkey !== null
+              && event.pubkey.toLowerCase() === trustedHostPubkey
             ));
             const announcement = trustedAnnouncements[0] || null;
             const address = announcement ? addressableCoordinate(announcement) : null;
-            const state = announcement
-              ? states
-                  .filter(event => (
-                    uniqueTagValue(event, "d") === repo.id
-                    && verificationService.isAuthorizedState(event, announcement)
-                  ))
-                  .sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id))[0] || null
-              : null;
+            const state = effectiveRepositoryState(
+              metadataEvents,
+              announcement,
+              deletionIndex
+            );
             const repoRoots = address
               ? visibleRootEvents
                   .filter(event => uniqueTagValue(event, "a") === address)
@@ -3630,12 +3943,14 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       statusEventFor(rootEvent, data) {
         const originalPatch = this.originalPatchForRevision(rootEvent, data);
         const statusRoot = originalPatch || rootEvent;
-        const allowedAuthors = verificationService.maintainerPubkeys(data.announcement);
-        allowedAuthors.add(statusRoot.pubkey.toLowerCase());
 
         return (data.statuses || [])
           .filter(event => (
-            allowedAuthors.has(event.pubkey.toLowerCase())
+            verificationService.isAuthorizedStatus(
+              event,
+              statusRoot,
+              data.announcement
+            )
             && scalarTagValues(event, "p").includes(data.announcement.pubkey)
             && scalarTagValues(event, "p").includes(statusRoot.pubkey)
             && uniqueMarkedEventReference(event, "root")?.id === statusRoot.id
@@ -4628,8 +4943,16 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const comments = this.validCommentsForRoot(root, data);
           const commentMap = new Map(comments.map(comment => [comment.id, comment]));
           const parent = commentMap.get(this.currentCommentParentId) || root;
-          const relayUrls = repositoryRelayUrls(data.announcement);
-          const relayHint = relayUrls[0] || "";
+          const repositoryRelays = repositoryRelayUrls(data.announcement);
+          const relayHint = repositoryRelays[0] || "";
+          const relayUrls = await this.publicationRelayUrls(
+            data.announcement,
+            [
+              data.announcement.pubkey,
+              root.pubkey,
+              parent.pubkey
+            ]
+          );
 
           const signedComment = await nostrService.signAndPublish({
             kind: 1111,
@@ -4668,8 +4991,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         if (!await nostrService.login(false) || !nostrService.pubkey) {
           throw new Error("Connect a Nostr signer first.");
         }
-        const allowedAuthors = verificationService.maintainerPubkeys(data.announcement);
-        allowedAuthors.add(root.pubkey.toLowerCase());
+        const allowedAuthors = verificationService.statusAuthorPubkeys(
+          root,
+          data.announcement
+        );
         if (!allowedAuthors.has(nostrService.pubkey.toLowerCase())) {
           throw new Error("Only the root author or a repository maintainer may change this status.");
         }
@@ -4686,13 +5011,17 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           throw new Error("Invalid NIP-34 status.");
         }
         await this.requireRootStatusAuthority(root, data);
-        const relayUrls = repositoryRelayUrls(data.announcement);
-        const relayHint = relayUrls[0] || "";
+        const repositoryRelays = repositoryRelayUrls(data.announcement);
+        const relayHint = repositoryRelays[0] || "";
         const mentionedPubkeys = new Set([
           data.announcement.pubkey,
           root.pubkey,
           ...additionalPubkeys.filter(pubkey => HEX_64.test(pubkey || ""))
         ]);
+        const relayUrls = await this.publicationRelayUrls(
+          data.announcement,
+          Array.from(mentionedPubkeys)
+        );
         const tags = [
           ["e", root.id, relayHint, "root"],
           ...Array.from(mentionedPubkeys).sort().map(pubkey => ["p", pubkey]),
@@ -4833,7 +5162,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             kind: 1619,
             tags,
             content: ""
-          }, repositoryRelayUrls(data.announcement));
+          }, await this.publicationRelayUrls(
+            data.announcement,
+            [data.announcement.pubkey, root.pubkey]
+          ));
           this.cacheEvents([signedUpdate]);
           document.getElementById("pr-update-modal").classList.add("hidden");
           this.prUpdateRepoId = null;
@@ -4931,7 +5263,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           if (!await nostrService.login(false) || !nostrService.pubkey) {
             throw new Error("Connect a Nostr signer first.");
           }
-          const relayUrls = repositoryRelayUrls(announcement);
+          const relayUrls = await this.publicationRelayUrls(
+            announcement,
+            [announcement.pubkey]
+          );
           const ownStars = (data.stars || []).filter(star => (
             star.pubkey === nostrService.pubkey
           ));
@@ -4989,6 +5324,49 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       }
 
 // 1. Open and pre-fill the confirmation dialog
+      openRelaySettings() {
+        const settings = loadRelaySettings();
+        document.getElementById("relay-additional").value =
+          settings.additionalRelays.join("\n");
+        document.getElementById("relay-discovery").value =
+          settings.discoveryRelays.join("\n");
+        document.getElementById("relay-disabled").value =
+          settings.disabledRelays.join("\n");
+        const summary = document.getElementById("relay-authority-summary");
+        if (summary) {
+          const authority = this.domainAuthority;
+          summary.textContent = authority?.pubkey
+            ? `Domain authority: ${authority.pubkey}. NIP-05 discovery hints: ${
+                authority.relays.length > 0
+                  ? authority.relays.join(", ")
+                  : "none"
+              }.`
+            : "The domain’s NIP-05 names._ authority has not been loaded.";
+        }
+        document.getElementById("relay-settings-modal").classList.remove("hidden");
+      }
+
+      async saveRelaySettings() {
+        try {
+          const settings = normalizeRelaySettings({
+            additionalRelays: relayUrlsFromText(
+              document.getElementById("relay-additional").value
+            ),
+            discoveryRelays: relayUrlsFromText(
+              document.getElementById("relay-discovery").value
+            ),
+            disabledRelays: relayUrlsFromText(
+              document.getElementById("relay-disabled").value
+            )
+          });
+          localStorage.setItem(RELAY_SETTINGS_KEY, JSON.stringify(settings));
+          document.getElementById("relay-settings-modal").classList.add("hidden");
+          await this.refreshAllNostr(true);
+        } catch (error) {
+          alert("Could not save relay settings: " + error.message);
+        }
+      }
+
       openPublishModal(repoId) {
         const repo = this.repositories.find(r => r.id === repoId);
         if (!repo) return;
@@ -5010,7 +5388,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         document.getElementById("pub-repo-relays").value =
           normalizeRelayUrls([
             ...(announcement ? tagValues(announcement, "relays") : []),
-            ...DEFAULT_RELAYS
+            ...this.discoveryRelayUrls
           ]).join("\n");
 
         document.getElementById("publish-modal").classList.remove("hidden");
@@ -5029,8 +5407,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         );
 
         if (!repoId || !cloneUrl) return alert("Missing required fields");
-        if (relayUrls.length < 2 || relayUrls.length > 4) {
-          return alert("Enter between two and four valid secure WebSocket relay URLs.");
+        if (relayUrls.length < 1 || relayUrls.length > 4) {
+          return alert("Enter between one and four valid secure WebSocket relay URLs.");
         }
 
         const basePath = window.location.pathname.replace(/\/[^\/]*$/, '/');
@@ -5039,6 +5417,18 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         try {
           if (!await nostrService.login(false)) {
             throw new Error("Connect a Nostr signer first.");
+          }
+          const authority = await verificationService.getDomainAuthority(
+            window.location.hostname,
+            true
+          );
+          if (!authority.pubkey) {
+            throw new Error("This domain has no valid NIP-05 names._ repository authority.");
+          }
+          if (nostrService.pubkey.toLowerCase() !== authority.pubkey) {
+            throw new Error(
+              "Only the domain’s NIP-05 names._ key may publish repository announcements."
+            );
           }
           const data = this.nostrData[repoId] || {};
           const ownedAnnouncement = latestAddressableEvents(
@@ -5057,6 +5447,22 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             cloneUrl,
             ...(ownedAnnouncement ? tagValues(ownedAnnouncement, "clone") : [])
           ]);
+          const announcementRelays = normalizeRelayUrls([
+            ...domainDiscoveryRelayUrls(authority),
+            ...relayUrls,
+            ...(ownedAnnouncement ? tagValues(ownedAnnouncement, "relays") : [])
+          ]);
+          const relayListHeads = await this.nip65HeadsForAuthors(
+            [authority.pubkey],
+            announcementRelays
+          );
+          const publicationRelays = prioritizedRelayUrls([
+            announcementRelays,
+            nip65WriteRelays(relayListHeads.get(authority.pubkey))
+          ]);
+          if (publicationRelays.length === 0) {
+            throw new Error("No announcement publication relay is configured.");
+          }
           const signedAnnouncement = await nostrService.signAndPublish({
             kind: 30617,
             tags: [
@@ -5069,7 +5475,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               ...preservedTags
             ],
             content: ""
-          }, relayUrls);
+          }, publicationRelays);
           this.cacheEvents([signedAnnouncement]);
 
           const warnings = nostrService.takePublicationWarnings();
@@ -5164,7 +5570,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             kind: 30618,
             tags,
             content: ""
-          }, repositoryRelayUrls(data.announcement));
+          }, await this.publicationRelayUrls(
+            data.announcement,
+            [data.announcement.pubkey]
+          ));
           this.cacheEvents([signedState]);
           alert(
             `Published branches and tags for repository “${this.currentRepo.name}” to Nostr.`
@@ -5264,7 +5673,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               ["subject", title]
             ],
             content: desc
-          }, repositoryRelayUrls(data.announcement));
+          }, await this.publicationRelayUrls(
+            data.announcement,
+            [data.announcement.pubkey]
+          ));
           this.cacheEvents([signedIssue]);
           alert("Issue published to Nostr!");
           document.getElementById("issue-modal").classList.add("hidden");
@@ -5337,7 +5749,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             kind: 1618,
             tags,
             content: desc
-          }, repositoryRelayUrls(data.announcement));
+          }, await this.publicationRelayUrls(
+            data.announcement,
+            [
+              data.announcement.pubkey,
+              ...(revisionPatch ? [revisionPatch.pubkey] : [])
+            ]
+          ));
           this.cacheEvents([signedPr]);
 
           let closeError = null;
@@ -5418,8 +5836,12 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           if (!data?.announcement || !data.address) {
             throw new Error("This repository has no Nostr announcement to attach the patch to.");
           }
-          const relayUrls = repositoryRelayUrls(data.announcement);
-          const relayHint = relayUrls[0] || "";
+          const repositoryRelays = repositoryRelayUrls(data.announcement);
+          const relayHint = repositoryRelays[0] || "";
+          const relayUrls = await this.publicationRelayUrls(
+            data.announcement,
+            [data.announcement.pubkey]
+          );
           const earliestUniqueCommit = repositoryEarliestUniqueCommit(data.announcement);
 
           for (let index = 0; index < payloads.length; index++) {
