@@ -1912,6 +1912,68 @@ const signedPublication = async requested => {
   clientNostrService.pubkey = signedInKey;
   ok(anonymousPolicy.sources[0].pubkey === attacker && storage.has(settingsKey),
     "local moderation preferences persist independently of sign-in without probing an extension");
+  const revokeApp = new App();
+  const otherAddress = `30617:${owner}:other`;
+  const otherRoot = { ...secretRoot, id: "b1".repeat(32), tags: [["a", otherAddress], ["p", owner]] };
+  const otherLabel = { ...modLabel, id: "b2".repeat(32), tags: [["L", namespace], ["l", "spam", namespace], ["e", otherRoot.id]] };
+  const remainingLabel = { ...parentLabel, id: "b3".repeat(32), pubkey: maintainer };
+  const allScopes = { sources: [
+    ...["*", address, otherAddress].map(scope => ({ ...policy.sources[0], scope })),
+    { ...policy.sources[0], pubkey: maintainer, scope: "*" }
+  ] };
+  revokeApp.nostrEventCache = new Map();
+  revokeApp.cacheEvents([secretRoot, otherRoot, modLabel, otherLabel, remainingLabel]);
+  const revokeData = { ...modData, moderation: new Map() };
+  const revokeOtherData = { ...modData, address: otherAddress, issues: [otherRoot], moderation: new Map() };
+  revokeApp.nostrData = { dummy: revokeData, other: revokeOtherData };
+  revokeApp.currentRepo = { id: "dummy", name: "dummy" };
+  let revocationDialog = "";
+  let refreshRequests = 0;
+  revokeApp.moderationDialog = (_, body) => { revocationDialog = body; };
+  revokeApp.renderModerationUpdate = () => revokeApp.reapplyModeration();
+  revokeApp.refreshAllNostr = () => { refreshRequests++; };
+  revokeApp.setModerationSettings(allScopes);
+  revokeApp.openModerationSettings();
+  ok((revocationDialog.match(/Stop trusting this person everywhere<\/button>/g) || []).length === 2
+    && (revocationDialog.match(/Remove only this scope entry<\/button>/g) || []).length === 4
+    && revocationDialog.indexOf("Trusted people") < revocationDialog.indexOf("Add or update a trusted person"),
+    "moderation dialog groups people with prominent all-scope revocation and explicit scoped removal");
+  const repositoryEntry = revokeApp.moderationSettings.sources.findIndex(source => source.pubkey === attacker && source.scope === address);
+  revokeApp.removeModerationSource(repositoryEntry);
+  ok(revokeApp.moderationSettings.sources.filter(source => source.pubkey === attacker).length === 2
+    && revokeApp.moderationHidden(secretRoot, revokeData),
+    "removing only a repository entry leaves the same person's global trust intact");
+  revokeApp.setModerationSettings(allScopes);
+  const generationBeforeRevoke = revokeApp.moderationGeneration;
+  const rawIdsBeforeRevoke = [...revokeApp.nostrEventCache.keys()].sort().join(",");
+  const selectedPrBeforeRevoke = revokeApp.latestPrUpdate(pr, revokeData);
+  // Hold an already-started label query until after the key is revoked.
+  let finishOldQuery;
+  clientNostrService.fetchEvents = filters => filters[0].kinds.includes(1985)
+    ? new Promise(resolve => { finishOldQuery = resolve; }) : Promise.resolve([]);
+  const oldQuery = revokeApp.refreshModerationLabels([root.id], [address], ["wss://project.example"]);
+  revokeApp.removeModerationPerson(attacker);
+  ok(!revokeApp.moderationSettings.sources.some(source => source.pubkey === attacker)
+    && revokeApp.moderationSettings.sources.some(source => source.pubkey === maintainer)
+    && !revokeApp.moderationHidden(secretRoot, revokeData)
+    && !revokeApp.moderationHidden(otherRoot, revokeOtherData)
+    && revokeApp.moderationHidden(secretParent, revokeData)
+    && revokeApp.moderationGeneration > generationBeforeRevoke
+    && refreshRequests > 0,
+    "stop trusting everywhere immediately revokes every scope while retaining other people's judgments");
+  ok(!new App().moderationSettings.sources.some(source => source.pubkey === attacker)
+    && [...revokeApp.nostrEventCache.keys()].sort().join(",") === rawIdsBeforeRevoke
+    && revokeApp.latestPrUpdate(pr, revokeData) === selectedPrBeforeRevoke,
+    "all-scope revocation persists across reload without deleting facts or changing the selected PR update");
+  finishOldQuery([modLabel]);
+  await oldQuery;
+  revokeApp.reapplyModeration();
+  ok(!revokeApp.moderationHidden(secretRoot, revokeData)
+    && !revocationDialog.includes(`app.removeModerationPerson('${attacker}')`),
+    "an in-flight label query cannot undo all-scope revocation and the dialog removes the person");
+  clientNostrService.fetchEvents = priorFetch;
+  modApp.setModerationSettings(policy);
+
   const oldSignAndPublish = clientNostrService.signAndPublish;
   const oldLogin = clientNostrService.login;
   const oldPublicationRelays = modApp.publicationRelayUrls;

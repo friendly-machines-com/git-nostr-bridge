@@ -3019,11 +3019,17 @@ async loadRepoOnce(repoPath) {
         const address = this.currentRepo && this.nostrData[this.currentRepo.id]?.address;
         this.moderationDialog("Moderation settings", `
           <p class="form-help">These viewing preferences stay in this browser, including when you sign in or out. No one is trusted automatically. Labels do not change repository permissions or Git content.</p>
-          <ul>${sources.map((source, index) => `<li style="overflow-wrap:anywhere; margin:12px 0;">
-            <code>${escapeHtml(source.pubkey)}</code><br>${escapeHtml(source.scope === "*" ? "All repositories" : source.scope)}<br>
-            ${MODERATION_CATEGORIES.map(category => `${category}: ${source.actions[category]}`).join(" · ")}
-            <br>${escapeHtml(source.relays.join(", "))}
-            <button class="btn btn-sm" onclick="app.removeModerationSource(${index})">Remove</button>
+          <h4 style="margin-top:12px;">Trusted people</h4>
+          <p class="form-help">Stop trusting a person everywhere to remove all their global and repository-specific entries in this browser. This takes effect immediately without signing or waiting for relays. Other trusted people's judgments still apply.</p>
+          <ul>${sortedUniqueStrings(sources.map(source => source.pubkey)).map(pubkey => `<li style="overflow-wrap:anywhere; margin:12px 0;">
+            <code>${escapeHtml(pubkey)}</code>
+            <div style="margin:8px 0;"><button class="btn btn-primary" onclick="app.removeModerationPerson('${pubkey}')">Stop trusting this person everywhere</button></div>
+            <ul>${sources.map((source, index) => source.pubkey !== pubkey ? "" : `<li style="margin:8px 0;">
+              ${escapeHtml(source.scope === "*" ? "All repositories" : source.scope)}<br>
+              ${MODERATION_CATEGORIES.map(category => `${category}: ${source.actions[category]}`).join(" · ")}
+              <br>${escapeHtml(source.relays.join(", "))}
+              <button class="btn btn-sm" onclick="app.removeModerationSource(${index})">Remove only this scope entry</button>
+            </li>`).join("")}</ul>
           </li>`).join("") || "<li>No trusted moderators.</li>"}</ul>
           <h4>Add or update a trusted person</h4>
           <div class="form-field"><label for="moderator-key">Public key (npub or hex)</label><input id="moderator-key" spellcheck="false"></div>
@@ -3061,6 +3067,20 @@ async loadRepoOnce(repoPath) {
           this.setModerationSettings({ sources: [...sources, { pubkey, scope, actions, relays }] });
           this.openModerationSettings();
         } catch (error) { alert(`Could not save moderation settings: ${error.message}`); }
+      }
+
+      removeModerationPerson(value) {
+        try {
+          const pubkey = moderationPubkey(value);
+          if (!pubkey) throw new Error("Invalid moderator public key.");
+          // Revoke the key across ALL scopes, not just the current repository.
+          // Reuse the local policy path: preserve facts/authority, recompute
+          // visibility now, and invalidate policy captured by in-flight queries.
+          this.setModerationSettings({
+            sources: this.moderationSettings.sources.filter(source => source.pubkey !== pubkey)
+          });
+          this.openModerationSettings();
+        } catch (error) { alert(`Could not stop trusting this person: ${error.message}`); }
       }
 
       removeModerationSource(index) {
