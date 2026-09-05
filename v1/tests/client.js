@@ -1934,10 +1934,49 @@ const signedPublication = async requested => {
   revokeApp.refreshAllNostr = () => { refreshRequests++; };
   revokeApp.setModerationSettings(allScopes);
   revokeApp.openModerationSettings();
-  ok((revocationDialog.match(/Stop trusting this person everywhere<\/button>/g) || []).length === 2
+  ok((revocationDialog.match(/Stop using this moderator everywhere<\/button>/g) || []).length === 2
+    && revocationDialog.includes("You choose whose moderation judgments affect your view.")
+    && revocationDialog.includes("Their published content remains unchanged.")
     && (revocationDialog.match(/Remove only this scope entry<\/button>/g) || []).length === 4
-    && revocationDialog.indexOf("Trusted people") < revocationDialog.indexOf("Add or update a trusted person"),
+    && revocationDialog.indexOf("Trusted moderators") < revocationDialog.indexOf("Add or update a trusted moderator"),
     "moderation dialog groups people with prominent all-scope revocation and explicit scoped removal");
+  const dialogStateApp = new App();
+  let dialogStateHtml = "";
+  dialogStateApp.moderationDialog = (_, body) => { dialogStateHtml = body; };
+  dialogStateApp.renderModerationUpdate = () => dialogStateApp.reapplyModeration();
+  dialogStateApp.refreshAllNostr = () => {};
+  dialogStateApp.moderationSettings = { sources: [] };
+  dialogStateApp.openModerationSettings();
+  ok(dialogStateHtml.includes("You haven’t selected any moderators.")
+    && dialogStateHtml.includes("No one else’s moderation labels affect your view.")
+    && !dialogStateHtml.includes("Stop using this moderator everywhere")
+    && !dialogStateHtml.includes("Stops applying only this moderator’s judgments")
+    && !dialogStateHtml.includes("Remove only this scope entry"),
+    "empty moderator dialog explains adding a moderator without irrelevant removal guidance");
+  const fiveModeratorKeys = [owner, rootAuthor, maintainer, attacker, "f".repeat(64)];
+  for (const count of [1, 5]) {
+    dialogStateApp.moderationSettings = normalizeModerationSettings({
+      sources: fiveModeratorKeys.slice(0, count).map(pubkey => ({ ...policy.sources[0], pubkey }))
+    });
+    dialogStateApp.openModerationSettings();
+    const cards = [...dialogStateHtml.matchAll(/<li style="overflow-wrap:anywhere; margin:12px 0;">([\s\S]*?)<\/ul>\s*<\/li>/g)];
+    assert.equal(cards.length, count);
+    for (const [index, card] of cards.entries()) {
+      const key = fiveModeratorKeys.slice(0, count).sort()[index];
+      assert.ok(card[1].includes(`<code>${key}</code>`));
+      assert.ok(card[1].includes(`app.removeModerationPerson('${key}')`));
+      assert.ok(card[1].includes("Stops applying only this moderator’s judgments"));
+      assert.ok(card[1].includes("Other moderators remain active"));
+    }
+    ok(!dialogStateHtml.includes("You haven’t selected any moderators.")
+      && dialogStateHtml.includes("You choose whose moderation judgments affect your view."),
+      `${count}-moderator dialog attaches keys, removal controls and explanations to each individual`);
+  }
+  dialogStateApp.removeModerationPerson(maintainer);
+  ok(dialogStateApp.moderationSettings.sources.length === 4
+    && !dialogStateHtml.includes(`app.removeModerationPerson('${maintainer}')`)
+    && fiveModeratorKeys.filter(key => key !== maintainer).every(key => dialogStateHtml.includes(`app.removeModerationPerson('${key}')`)),
+    "removing one of five moderators leaves the other four displayed and active");
   const repositoryEntry = revokeApp.moderationSettings.sources.findIndex(source => source.pubkey === attacker && source.scope === address);
   revokeApp.removeModerationSource(repositoryEntry);
   ok(revokeApp.moderationSettings.sources.filter(source => source.pubkey === attacker).length === 2

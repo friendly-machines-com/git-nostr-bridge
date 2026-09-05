@@ -473,10 +473,16 @@ for moderation automatically.
 Each source is a public key (hex or npub input), a scope (all repositories or an
 exact `30617` repository coordinate), optional secure WebSocket relay hints, and
 an action for each category: **hide**, **warn**, or **ignore**. Adding the same
-key and scope updates that preference. Under **Trusted people**, **Stop trusting
-this person everywhere** removes that key's global and repository-specific
-entries throughout this browser's origin-local settings. **Remove only this
-scope entry** removes just the displayed entry; other scopes for that person
+key and scope updates that preference. **Trusted moderators** shows an empty-state
+explanation when none are selected; otherwise it lists each moderator separately
+with their key, scopes, and removal controls. Removal guidance belongs to the
+individual moderator, not the empty list.
+
+**Stop using this moderator everywhere** stops applying only that moderator's
+judgments across all repositories in this browser's origin-local settings by
+removing their global and repository-specific moderation preferences. Their
+published content remains unchanged. **Remove only this scope entry** removes
+just the displayed entry; other scopes for that moderator
 remain active. Both recompute visibility immediately from cached facts without
 signing or waiting for relays. Other trusted people's judgments still apply.
 Late query results cannot reinstate removed trust. These settings are not

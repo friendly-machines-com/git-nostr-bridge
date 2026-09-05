@@ -3021,19 +3021,22 @@ async loadRepoOnce(repoPath) {
         const address = this.currentRepo && this.nostrData[this.currentRepo.id]?.address;
         this.moderationDialog("Moderation settings", `
           <p class="form-help">These viewing preferences stay in this browser, including when you sign in or out. No one is trusted automatically. Labels do not change repository permissions or Git content.</p>
-          <h4 style="margin-top:12px;">Trusted people</h4>
-          <p class="form-help">Stop trusting a person everywhere to remove all their global and repository-specific entries in this browser. This takes effect immediately without signing or waiting for relays. Other trusted people's judgments still apply.</p>
+          <h4 style="margin-top:12px;">Trusted moderators</h4>
+          <p class="form-help">${sources.length
+            ? "You choose whose moderation judgments affect your view."
+            : "You haven’t selected any moderators. No one else’s moderation labels affect your view. Add a moderator below to use their judgments."}</p>
           <ul>${sortedUniqueStrings(sources.map(source => source.pubkey)).map(pubkey => `<li style="overflow-wrap:anywhere; margin:12px 0;">
             <code>${escapeHtml(pubkey)}</code>
-            <div style="margin:8px 0;"><button class="btn btn-primary" onclick="app.removeModerationPerson('${pubkey}')">Stop trusting this person everywhere</button></div>
+            <div style="margin:8px 0;"><button class="btn btn-primary" onclick="app.removeModerationPerson('${pubkey}')">Stop using this moderator everywhere</button></div>
+            <p class="form-help">Stops applying only this moderator’s judgments across all repositories in this browser, immediately without signing or waiting for relays. Their published content remains unchanged. Other moderators remain active, so content they also flagged may stay hidden.</p>
             <ul>${sources.map((source, index) => source.pubkey !== pubkey ? "" : `<li style="margin:8px 0;">
               ${escapeHtml(source.scope === "*" ? "All repositories" : source.scope)}<br>
               ${MODERATION_CATEGORIES.map(category => `${category}: ${source.actions[category]}`).join(" · ")}
               <br>${escapeHtml(source.relays.join(", "))}
               <button class="btn btn-sm" onclick="app.removeModerationSource(${index})">Remove only this scope entry</button>
             </li>`).join("")}</ul>
-          </li>`).join("") || "<li>No trusted moderators.</li>"}</ul>
-          <h4>Add or update a trusted person</h4>
+          </li>`).join("")}</ul>
+          <h4>Add or update a trusted moderator</h4>
           <div class="form-field"><label for="moderator-key">Public key (npub or hex)</label><input id="moderator-key" spellcheck="false"></div>
           <div class="form-field"><label for="moderator-scope">Apply judgments to</label><select id="moderator-scope">
             <option value="*">All repositories</option>
