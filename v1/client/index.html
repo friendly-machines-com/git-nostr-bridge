@@ -238,6 +238,47 @@
       align-items: center;
     }
 
+    .ci-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      border-radius: 12px;
+      white-space: nowrap;
+    }
+    .ci-badge-success { background: var(--badge-green-bg); color: var(--badge-green-text); border: 1px solid var(--green); }
+    .ci-badge-failure { background: var(--badge-red-bg); color: var(--badge-red-text); border: 1px solid var(--red); }
+    .ci-badge-pending { background: var(--badge-blue-bg); color: var(--badge-blue-text); border: 1px solid var(--blue); }
+    .ci-badge-none { background: var(--surface-raised); color: var(--text-muted); border: 1px solid var(--border); }
+    .ci-details { position: relative; display: inline-block; margin-left: 10px; }
+    .ci-details > summary { list-style: none; cursor: pointer; }
+    .ci-details > summary::-webkit-details-marker { display: none; }
+    .ci-details-body {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 100;
+      min-width: 220px;
+      max-width: min(420px, 85vw);
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 0.78rem;
+      text-align: left;
+      box-shadow: 0 4px 12px var(--modal-overlay);
+    }
+    .ci-details-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ci-details-list li { overflow-wrap: anywhere; }
+    .ci-details-list a { color: var(--blue); }
+
     .file-table {
       width: 100%;
       border-collapse: collapse;
@@ -488,7 +529,7 @@
 
         <div class="commit-banner" id="commit-banner">
           <div><strong id="banner-author">Author</strong>: <span id="banner-msg">Commit message</span></div>
-          <div><code id="banner-oid" style="color:var(--blue);">...</code></div>
+          <div><code id="banner-oid" style="color:var(--blue);">...</code><span id="banner-ci"></span></div>
         </div>
 
         <!-- Files List -->
@@ -807,9 +848,12 @@
      * may publish effective kind-30618 branch/tag state. Anyone may submit an
      * issue, patch, pull request, or comment. Under NIP-34, only the root-event
      * author or a current repository maintainer may publish its effective
-     * status. Every reducer applies these permission checks after signature,
-     * reference, replacement, and deletion validation, so a newer
-     * unauthorized event can never shadow an older authorized one.
+     * status. Commit CI statuses are NIP-32 label events; only current
+     * maintainers or keys the accepted announcement designates as CI runners
+     * may publish an effective one. Every reducer applies these permission
+     * checks after signature, reference, replacement, and deletion
+     * validation, so a newer unauthorized event can never shadow an older
+     * authorized one.
      */
 
     // ==========================================
@@ -825,6 +869,18 @@
     const RELAY_SETTINGS_KEY = "nostrgit:relay-settings:v1";
     const NIP34_STATUS_KINDS = Object.freeze([1630, 1631, 1632, 1633]);
     const NIP34_STATUS_KIND_SET = new Set(NIP34_STATUS_KINDS);
+    // NIP-32 label events carry commit CI status. The namespaces are a fixed
+    // set: a label event outside them is unrelated moderation or curation
+    // metadata and must never reach the commit view.
+    const NIP32_LABEL_KIND = 1985;
+    const CI_LABEL_NAMESPACES = Object.freeze([
+      "org.nostr.ci.status",
+      "ci/status",
+      "nip34.ci"
+    ]);
+    const CI_SUCCESS_LABELS = new Set(["success", "pass", "passed", "ok"]);
+    const CI_FAILURE_LABELS = new Set(["failure", "fail", "failed", "error"]);
+    const CI_PENDING_LABELS = new Set(["pending", "running", "in_progress"]);
     const NIP39_EXTERNAL_IDENTITIES_KIND = 10011;
     const NIP65_RELAY_LIST_KIND = 10002;
     const NIP39_AUTHOR_QUERY_LIMIT = 256;
@@ -1527,6 +1583,131 @@
         ))[0] || null;
     }
 
+    function ciLabelNamespaceValues(event) {
+      return sortedUniqueStrings((event?.tags || [])
+        .filter(tag => (
+          Array.isArray(tag)
+          && tag[0] === "L"
+          && CI_LABEL_NAMESPACES.includes(tag[1])
+        ))
+        .map(tag => tag[1]));
+    }
+
+    function safeCiCheckUrl(value) {
+      if (typeof value !== "string" || value.length === 0 || value.length > 2048) {
+        return null;
+      }
+      try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:"
+          ? url.href
+          : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function extractCiStatusEntry(event) {
+      if (event?.kind !== NIP32_LABEL_KIND) return null;
+      const commit = uniqueTagValue(event, "c");
+      if (commit === null || !GIT_COMMIT_ID.test(commit)) return null;
+      const namespaces = ciLabelNamespaceValues(event);
+      if (namespaces.length === 0) return null;
+
+      // A CI status is ["l", "<status>", "<namespace>"] or an unqualified
+      // ["l", "<status>"] when the event carries exactly one CI namespace.
+      // Distinct status values are ambiguous; neither tag position nor
+      // arrival order may select one.
+      const labelValues = new Set();
+      for (const tag of event.tags || []) {
+        if (!Array.isArray(tag) || tag[0] !== "l" || typeof tag[1] !== "string") {
+          continue;
+        }
+        if (typeof tag[2] === "string") {
+          if (!namespaces.includes(tag[2])) continue;
+        } else if (namespaces.length !== 1) {
+          continue;
+        }
+        labelValues.add(tag[1].trim().toLowerCase());
+      }
+      if (labelValues.size !== 1) return null;
+      const rawStatus = labelValues.values().next().value;
+      if (rawStatus === "") return null;
+
+      let state = "unknown";
+      if (CI_SUCCESS_LABELS.has(rawStatus)) state = "success";
+      else if (CI_FAILURE_LABELS.has(rawStatus)) state = "failure";
+      else if (CI_PENDING_LABELS.has(rawStatus)) state = "pending";
+
+      return {
+        id: event.id,
+        pubkey: event.pubkey.toLowerCase(),
+        commit: commit.toLowerCase(),
+        state,
+        rawStatus,
+        name: (uniqueTagValue(event, "name") || "ci").slice(0, 120),
+        url: safeCiCheckUrl(uniqueTagValue(event, "url")),
+        description: String(event.content || "").trim().slice(0, 300),
+        createdAt: event.created_at
+      };
+    }
+
+    function reduceCommitCiStatuses(events, announcement, deletionIndex) {
+      const address = announcement ? addressableCoordinate(announcement) : null;
+      const statusesByCommit = new Map();
+
+      for (const event of events) {
+        if (event?.kind !== NIP32_LABEL_KIND) continue;
+        if (eventIsDeleted(event, deletionIndex)) continue;
+        if (!verificationService.isAuthorizedCiStatus(event, announcement)) {
+          continue;
+        }
+        // A CI label that names a repository must name this one. Labels
+        // without an `a` tag stay attributable through their signed commit.
+        const referenced = uniqueTagValue(event, "a");
+        if (referenced !== null && referenced !== address) continue;
+
+        const entry = extractCiStatusEntry(event);
+        if (!entry) continue;
+
+        if (!statusesByCommit.has(entry.commit)) {
+          statusesByCommit.set(entry.commit, new Map());
+        }
+        const runners = statusesByCommit.get(entry.commit);
+        const runnerKey = `${entry.pubkey}:${entry.name}`;
+        const existing = runners.get(runnerKey);
+        // Keep the newest report per runner; the lowest event ID breaks an
+        // exact timestamp tie, matching addressable replacement ordering.
+        if (
+          !existing
+          || entry.createdAt > existing.createdAt
+          || (entry.createdAt === existing.createdAt && entry.id < existing.id)
+        ) {
+          runners.set(runnerKey, entry);
+        }
+      }
+
+      const aggregated = new Map();
+      for (const [commit, runners] of statusesByCommit.entries()) {
+        const checks = Array.from(runners.values()).sort((a, b) => (
+          a.name.localeCompare(b.name)
+          || a.pubkey.localeCompare(b.pubkey)
+        ));
+        // Any failure fails the commit. An unrecognized or still-running
+        // status must never roll up as passed.
+        let overall = "success";
+        if (checks.some(check => check.state === "failure")) {
+          overall = "failure";
+        } else if (checks.some(check => (
+          check.state === "pending" || check.state === "unknown"
+        ))) {
+          overall = "pending";
+        }
+        aggregated.set(commit, { overall, checks });
+      }
+      return aggregated;
+    }
+
     function latestReplaceableEvents(events, kind) {
       const latest = new Map();
       for (const event of events) {
@@ -2137,6 +2318,31 @@
           && NIP34_STATUS_KIND_SET.has(statusEvent.kind)
           && this.statusAuthorPubkeys(rootEvent, announcementEvent)
             .has(statusEvent.pubkey.toLowerCase());
+      }
+
+      // CI status labels follow the same trust chain as state: the accepted
+      // announcement's maintainers, plus any runner keys it explicitly
+      // designates with a ci_runner (or runner) tag.
+      ciAuthorPubkeys(announcementEvent) {
+        const pubkeys = this.maintainerPubkeys(announcementEvent);
+        for (const tag of announcementEvent?.tags || []) {
+          if (
+            Array.isArray(tag)
+            && (tag[0] === "ci_runner" || tag[0] === "runner")
+            && HEX_64.test(tag[1] || "")
+          ) {
+            pubkeys.add(tag[1].toLowerCase());
+          }
+        }
+        return pubkeys;
+      }
+
+      isAuthorizedCiStatus(labelEvent, announcementEvent) {
+        return !!labelEvent
+          && !!announcementEvent
+          && labelEvent.kind === NIP32_LABEL_KIND
+          && this.ciAuthorPubkeys(announcementEvent)
+            .has(labelEvent.pubkey.toLowerCase());
       }
     }
 
@@ -3035,7 +3241,31 @@ async loadRepoOnce(repoPath) {
         }
       }
 
-async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.navigationGeneration) {
+      resetRepositoryGitView() {
+        this.currentDir = null;
+        this.currentRef = null;
+        this.commits = [];
+        this.currentBranches = [];
+        this.currentTags = [];
+        this.currentCommitOid = null;
+        this.pathStack = [];
+        for (const id of ["branch-select", "commit-select"]) {
+          const select = document.getElementById(id);
+          select.innerHTML = '';
+          select.disabled = true;
+        }
+        document.getElementById("current-path-breadcrumb").innerHTML = '';
+        document.getElementById("file-viewer").classList.add("hidden");
+        document.getElementById("viewer-filename").textContent = '';
+        document.getElementById("viewer-code").textContent = '';
+        document.getElementById("viewer-download-btn").onclick = null;
+        document.getElementById("banner-author").textContent = "—";
+        document.getElementById("banner-msg").textContent = "No commit available";
+        document.getElementById("banner-oid").textContent = "—";
+        this.clearCommitCiBadge();
+      }
+
+      async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.navigationGeneration) {
         const isCurrentNavigation = () => (
           navigationGeneration === this.navigationGeneration
         );
@@ -3043,23 +3273,19 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
 
         if (isDifferentRepo) {
           this.currentRepo = repo;
-          this.currentDir = null;
-          this.commits = [];
-          this.currentBranches = [];
-          this.currentTags = [];
-          this.currentCommitOid = null;
-          this.pathStack = [];
+          this.resetRepositoryGitView();
+          this.showTabElement("code");
           this.currentIssueId = null;
           this.currentThreadType = null;
           this.currentCommentScopeId = null;
           this.currentCommentParentId = null;
 
           document.getElementById("file-table-body").innerHTML = '<tr><td colspan="4" style="color:var(--text-muted); padding:16px;">Loading git objects...</td></tr>';
-          document.getElementById("current-path-breadcrumb").innerHTML = '';
-          document.getElementById("file-viewer").classList.add("hidden");
-          document.getElementById("banner-author").textContent = "...";
-          document.getElementById("banner-msg").textContent = "...";
-          document.getElementById("banner-oid").textContent = "...";
+          const indicator = document.getElementById("loading-git-indicator");
+          if (indicator) {
+            indicator.textContent = "";
+            indicator.style.color = "var(--text-muted)";
+          }
         } else if (this.currentDir) {
           return true;
         }
@@ -3075,11 +3301,9 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
         document.getElementById("repo-name-header").textContent = displayName;
         document.getElementById("repo-desc-header").textContent = displayDesc;
 
-        if (!loadGitObjects) {
-          if (!isCurrentNavigation()) return false;
-          this.loadNostrTabs();
-          return true;
-        }
+        // Collaboration data belongs to this repository even if Git cannot load.
+        this.loadNostrTabs();
+        if (!loadGitObjects) return isCurrentNavigation();
 
         const indicator = document.getElementById("loading-git-indicator");
         if (indicator) indicator.textContent = "Loading git objects...";
@@ -3087,11 +3311,11 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
         try {
           const loadedDir = await gitService.loadRepo(repo.path);
           if (!isCurrentNavigation() || this.currentRepo?.id !== repo.id) return false;
-          this.currentDir = loadedDir;
-
-          const branches = await gitService.getBranches(this.currentDir);
-          const tags = await gitService.getTags(this.currentDir);
+          const branches = await gitService.getBranches(loadedDir);
+          const tags = await gitService.getTags(loadedDir);
+          const detectedDefault = await gitService.getDefaultBranch(loadedDir, branches);
           if (!isCurrentNavigation() || this.currentRepo?.id !== repo.id) return false;
+          this.currentDir = loadedDir;
           this.currentBranches = branches;
           this.currentTags = tags;
 
@@ -3104,7 +3328,6 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
             || '<option value="HEAD">Empty repository</option>';
 
           // Dynamically select detected default branch (main, master, etc.)
-          const detectedDefault = await gitService.getDefaultBranch(this.currentDir, branches);
           this.currentRef = detectedDefault
             ? `refs/remotes/origin/${detectedDefault}`
             : tags[0]
@@ -3112,8 +3335,7 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
               : "HEAD";
 
           branchSelect.value = this.currentRef;
-
-          this.loadNostrTabs();
+          branchSelect.disabled = branches.length === 0 && tags.length === 0;
           if (indicator) {
             const warning = gitService.loadWarnings.get(this.currentDir);
             indicator.style.color = warning ? "var(--warning)" : "var(--text-muted)";
@@ -3122,6 +3344,8 @@ async ensureRepoLoaded(repo, loadGitObjects = true, navigationGeneration = this.
           return true;
         } catch (err) {
           if (!isCurrentNavigation()) return false;
+          this.resetRepositoryGitView();
+          this.showTabElement("code");
           if (indicator) {
             indicator.style.color = "var(--red)";
             indicator.textContent = `Error: ${err.message}`;
@@ -3176,6 +3400,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           this.commits = loadedCommits;
           const commitSelect = document.getElementById("commit-select");
+          commitSelect.disabled = this.commits.length === 0;
           if (this.commits.length > 0) {
             commitSelect.innerHTML = this.commits.map(c => `
               <option value="${escapeHtml(c.oid)}">${escapeHtml(c.oid.substring(0, 7))} - ${escapeHtml((c.commit.message || "").substring(0, 30))}</option>
@@ -3190,6 +3415,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             document.getElementById("banner-author").textContent = "Git";
             document.getElementById("banner-msg").textContent = "No commit available";
             document.getElementById("banner-oid").textContent = "—";
+            this.clearCommitCiBadge();
             document.getElementById("file-table-body").innerHTML = `<tr><td colspan="4" style="padding:16px; color:var(--text-muted);">No commits found on ref ${escapeHtml(ref)}.</td></tr>`;
             return;
           }
@@ -3422,6 +3648,65 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         document.getElementById("banner-author").textContent = (commitObj.commit && commitObj.commit.author && commitObj.commit.author.name) || "Git";
         document.getElementById("banner-msg").textContent = (commitObj.commit && commitObj.commit.message) || "";
         document.getElementById("banner-oid").textContent = commitObj.oid;
+        this.renderCommitCiBadge(commitObj.oid);
+      }
+
+      ciChecksByCommit() {
+        if (!this.currentRepo) return null;
+        const statuses = this.nostrData[this.currentRepo.id]?.ciStatuses;
+        return statuses instanceof Map ? statuses : null;
+      }
+
+      clearCommitCiBadge() {
+        const target = document.getElementById("banner-ci");
+        if (target) target.innerHTML = "";
+      }
+
+      renderCommitCiBadge(commitOid) {
+        const target = document.getElementById("banner-ci");
+        if (!target) return;
+        const commit = String(commitOid || "").toLowerCase();
+        const record = commit
+          ? this.ciChecksByCommit()?.get(commit) || null
+          : null;
+        if (!record || record.checks.length === 0) {
+          target.innerHTML =
+            '<span class="ci-badge ci-badge-none" title="No CI checks reported for this commit">⚪ no CI</span>';
+          return;
+        }
+
+        const rollups = {
+          success: ["✓", "passed", "ci-badge-success"],
+          failure: ["✕", "failed", "ci-badge-failure"],
+          pending: ["⏳", "running", "ci-badge-pending"]
+        };
+        const [icon, labelText, badgeClass] = rollups[record.overall]
+          || rollups.pending;
+        const stateIcons = {
+          success: "✓",
+          failure: "✕",
+          pending: "⏳",
+          unknown: "?"
+        };
+        const checkItems = record.checks.map(check => {
+          const checkName = escapeHtml(check.name);
+          const link = check.url
+            ? `<a href="${escapeHtml(check.url)}" target="_blank" rel="noopener noreferrer">${checkName}</a>`
+            : checkName;
+          const detail = escapeHtml(
+            check.description || check.rawStatus || check.state
+          );
+          return `<li>${stateIcons[check.state] || "?"} ${link}: ${detail}</li>`;
+        }).join("");
+
+        target.innerHTML = `
+          <details class="ci-details">
+            <summary class="ci-badge ${badgeClass}" title="Continuous-integration checks for this commit">${icon} ${labelText} (${record.checks.length})</summary>
+            <div class="ci-details-body">
+              <ul class="ci-details-list">${checkItems}</ul>
+            </div>
+          </details>
+        `;
       }
 
       switchTab(tabName) {
@@ -3694,7 +3979,36 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               .filter(event => event.kind === 1617)
               .map(event => event.id)
           ]);
+          // CI status labels are ordinary label events discovered through
+          // the same repository rendezvous: by repository address, and by
+          // the commit IDs currently selectable in the code view. A commit-
+          // scoped query also finds runner labels that carry no `a` tag.
+          const ciCommitIds = this.currentRepo
+            ? sortedUniqueStrings(this.commits
+                .map(commit => (commit?.oid || "").toLowerCase())
+                .filter(oid => GIT_COMMIT_ID.test(oid)))
+            : [];
+          const ciFilters = [];
+          if (uniqueAddresses.length > 0) {
+            ciFilters.push({
+              kinds: [NIP32_LABEL_KIND],
+              "#L": [...CI_LABEL_NAMESPACES],
+              "#a": uniqueAddresses
+            });
+          }
+          if (ciCommitIds.length > 0) {
+            ciFilters.push({
+              kinds: [NIP32_LABEL_KIND],
+              "#L": [...CI_LABEL_NAMESPACES],
+              "#c": ciCommitIds
+            });
+          }
           const threadQueries = [];
+          if (ciFilters.length > 0) {
+            threadQueries.push(
+              nostrService.fetchEvents(ciFilters, 4000, collaborationRelays)
+            );
+          }
           if (statusTargetIds.length > 0) {
             threadQueries.push(
               nostrService.fetchEvents([
@@ -3746,6 +4060,14 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             event.kind === 1619
             && rootIdSetAll.has(uniqueTagValue(event, "E"))
           ));
+          const ciLabelEvents = this.cachedEvents(event => (
+            event.kind === NIP32_LABEL_KIND
+            && (event.tags || []).some(tag => (
+              Array.isArray(tag)
+              && tag[0] === "L"
+              && CI_LABEL_NAMESPACES.includes(tag[1])
+            ))
+          ));
 
           // Announcement/state tombstones may live on either the domain
           // discovery relays or the repository relays. Keep this metadata
@@ -3777,7 +4099,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   ...starReactionCandidates,
                   ...statuses,
                   ...comments,
-                  ...prUpdates
+                  ...prUpdates,
+                  ...ciLabelEvents
                 ].map(event => event.id)
               ],
               [],
@@ -3824,6 +4147,11 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               announcement,
               deletionIndex
             );
+            const ciStatuses = reduceCommitCiStatuses(
+              ciLabelEvents,
+              announcement,
+              deletionIndex
+            );
             const repoRoots = address
               ? visibleRootEvents
                   .filter(event => uniqueTagValue(event, "a") === address)
@@ -3855,6 +4183,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               announcement,
               address,
               state,
+              ciStatuses,
               nip05: announcement
                 ? await verificationService.verifyNip05(announcement.pubkey, hostDomain)
                 : null,
@@ -5221,6 +5550,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         document.getElementById("issues-badge").textContent = data.issues.length;
         document.getElementById("prs-badge").textContent = data.pullRequests.length;
         document.getElementById("patches-badge").textContent = data.patchRoots.length;
+        if (this.currentCommitOid) {
+          this.renderCommitCiBadge(this.currentCommitOid);
+        }
         this.renderNostrList("issues-list", data.issues, data, "No issues yet.");
         this.renderNostrList("prs-list", data.pullRequests, data, "No pull requests yet.");
         this.renderNostrList("patches-list", data.patchRoots, data, "No patches yet.");
