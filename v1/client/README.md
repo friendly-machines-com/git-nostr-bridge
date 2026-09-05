@@ -1,5 +1,133 @@
 # NostrGit client ordering and convergence
 
+## Architectural invariant: TWO SEPARATE LAYERS — read before changing code
+
+**Trusted-person moderation is a separate, downstream PRESENTATION layer.
+It MUST NOT change the event set, protocol ranking, graph structure, repository
+authority, or Git state used by the first layer. This separation is deliberate,
+not an implementation detail to simplify away during refactoring.**
+
+```text
+Verified, immutable event-ID cache + retained NIP-09 deletion requests
+    |
+    v
+LAYER 1: protocol validity, repository authority, replacement/status/update
+         selection, and reference-graph construction
+    |
+    | authoritative result and graph (independent of moderation preferences)
+    v
+LAYER 2: viewer-selected trusted-person labels + local visibility policy
+         -> render normally, warn, or show a content-free placeholder
+```
+
+The cache also holds moderation labels and their deletion requests as verified
+facts. Sharing storage and a refresh loop does NOT merge these two layers.
+With the same cached facts, changing the viewer's trusted moderators MUST leave
+all first-layer winners, permissions, refs, statuses, and graph edges unchanged.
+Only their permitted presentation changes.
+
+This README is persistent architectural context for future maintainers and AI
+assistants, who may have neither this conversation nor the whole file in context.
+Keep large explanations canonical, but repeat short safeguards in the sections
+where they prevent mistakes. A cross-reference supplements a local constraint;
+it is not a substitute for one. Before changing this document, audit every
+removal for lost meaning, qualifications, and local context. Do not make the user
+rediscover missing safeguards. Documentation cleanup must not silently change
+architecture; if code and documentation disagree, investigate rather than
+rewriting either to assume a different design.
+
+### How first-layer ranking actually works
+
+There is **no universal reputation score or global event ranking**. "Ranking"
+here means deterministic, event-type-specific selection among protocol
+candidates, not popularity, Web of Trust, moderator votes, or relay arrival order.
+
+- **Eligibility:** verify signatures/event IDs, timestamp bounds, repository
+  membership, kind-specific references, and author permissions. Newer does not
+  mean authorized. See [identity and reference validation](#identity-and-causality)
+  and [repository permissions](#how-repository-discovery-and-permissions-work).
+- **Addressable repository announcements and state:** group versions by exact
+  `(kind, pubkey, d)` coordinate. Select the greatest `created_at`; if timestamps
+  tie, select the lexically lowest event ID. Select that coordinate's head
+  **before** applying its author-authorized deletion. Deleting that head does
+  not resurrect an older version of the same coordinate. Only the domain's
+  exact announcement coordinate is authoritative. Effective state is selected
+  from valid, non-deleted heads authored by current maintainers, using newest
+  timestamp and lowest-ID tie-break again.
+- **Regular replaceable identity and relay-list snapshots:** likewise select
+  one head per `(kind, pubkey)`, newest timestamp then lowest event ID, before
+  deletion. Never union older snapshots or fall back to a superseded snapshot
+  merely because its head was deleted.
+- **Contribution statuses and PR updates:** these are ordinary events with
+  application-specific reducers, not addressable replacements. Among eligible,
+  non-deleted events, choose newest `created_at`, then lowest event ID. Statuses
+  require the contribution author or a current maintainer; PR updates require
+  the original PR author and valid references/source data.
+  Author deletion of one of these ordinary events can expose an older eligible
+  result under the existing reducer. **That is first-layer deletion behavior,
+  not permission for second-layer moderation to cause fallback.**
+- **CI:** among authorized, non-deleted reports, select the newest per commit
+  and `(signing key, check name)`, with lowest event ID breaking ties; then roll
+  up the resulting checks. CI's latest-check convention is not the moderation
+  label algorithm.
+- **Issues, comments, and patch series:** distinct immutable contributions do
+  not become versions of one another. Root lists use newest-first display order
+  with lowest-ID ties. Comment/patch parentage comes only from validated event
+  references; siblings use oldest-first timestamp order with lowest-ID ties.
+  A display ordering MUST NOT be mistaken for replacement or causal ordering.
+
+NIP-09 author-authorized deletion belongs to these protocol semantics. A trusted
+moderator's spam label is NOT a NIP-09 deletion of the target and MUST NOT be
+inserted into the target's deletion index.
+
+### If the first-layer winner is labeled spam
+
+**Select first, then apply visibility to the selected result. NEVER remove spam-
+labeled candidates and rerun selection to promote the runner-up.**
+
+For example, suppose a PR author publishes two valid source updates:
+
+```text
+update A: created_at = 100, source tip = commit A
+update B: created_at = 200, source tip = commit B
+
+Layer 1 selects B.
+A trusted moderator labels B spam; the viewer's policy says "hide".
+Layer 2 shows a placeholder instead of B's source fields.
+Layer 1 STILL selects B. A MUST NOT be displayed as the current source tip.
+```
+
+The hidden result remains distinguishable from absent, invalid, unresolved, or
+author-deleted data. Withdrawing a label or removing a trusted moderator reveals
+the same selected result only if no other applicable hiding judgment remains.
+**Show anyway** locally reveals that result but never overrides author deletion.
+Newly received protocol facts may independently change which result is selected.
+A genuinely newer eligible update can become the winner through layer 1; its
+visibility is then evaluated separately by layer 2.
+
+Not every first-layer result is eligible for moderation. **Repository
+announcements, accepted branch/tag state, workflow status selection, CI results,
+and actual Git refs/commits/trees are outside the moderation target scope.**
+A spam label aimed at these objects does not hide or replace them. Hiding a
+patch submission never hides its commit from a maintainer-published branch.
+The moderated payload kinds are issues, PR submissions/updates, individual
+patch messages/revisions, and comments.
+
+For graph nodes rather than replacement winners, retain the node's ID, parent
+relation, position, and non-hidden descendants. Hiding a root does not label its
+descendants. The [visibility UI](#visibility-ui-and-publication) describes how
+these preserved nodes are presented.
+
+**Forbidden architectural shortcuts:** filtering moderated events before
+`latestPrUpdate` or other first-layer reducers; treating hidden as deleted;
+feeding visibility-filtered arrays into graph construction or discovery;
+adding trusted moderators to maintainer/status/CI authorization sets; rewriting
+Git state to match a moderated view. Regression tests must preserve this
+boundary, including "hidden winner does not promote runner-up."
+
+See [Trusted-person moderation and local visibility](#trusted-person-moderation-and-local-visibility)
+for the separate label algebra, withdrawal rules, and local preference behavior.
+
 This behavior follows
 [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md),
 [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md),
@@ -15,6 +143,9 @@ comment's parent may become visible in any order and may be returned by
 different repository relays.
 
 ## How repository discovery and permissions work
+
+**Moderation trust is not repository authority. Never add viewer-selected
+moderators to maintainer, status-author, or CI-runner permission sets.**
 
 Git repository names still come from the server's ordinary `projects.list`.
 For a repository such as `mobileapp.git`, the browser removes the `.git`
@@ -130,8 +261,8 @@ event. Interpretation of that sequence uses narrower types:
   root author's pubkey. If a reply tag supplies a parent-author field, it must
   match the actual parent. Relay delivery and timestamps never establish
   patch order.
-- `created_at` never establishes parentage. It is used only to order siblings,
-  with event ID as the deterministic tie-breaker.
+- `created_at` never establishes parentage. Within comment and patch graphs,
+  it orders siblings only, with event ID as the deterministic tie-breaker.
 - Status kinds are the explicit NIP-34 set `1630`, `1631`, `1632`, and `1633`;
   the client does not interpret an integer interval as a semantic kind group.
 - Replaceable repository announcements and states use NIP-01 replacement
@@ -141,9 +272,17 @@ event. Interpretation of that sequence uses narrower types:
 
 ## Replacement and deletion
 
-- Kinds `30617` and `30618` are addressable events. The client retains versions
-  for convergence but selects exactly one NIP-01 winner per coordinate before
-  applying visibility rules.
+**Hidden is not deleted. A spam label must not become a deletion tombstone for
+its target, and hiding a selected winner must not promote an older candidate.**
+
+Head selection and its interaction with deletion are defined in
+[first-layer ranking](#how-first-layer-ranking-actually-works). The following
+rules define NIP-09 target authorization and tombstone retention.
+
+- Kinds `30617` and `30618` are addressable events. Retain versions for
+  convergence, but select exactly one NIP-01 head per coordinate before applying
+  deletion: newest `created_at`, then lowest event ID. Deleting the selected
+  head does not resurrect an older version of that coordinate.
 - Publishing a new `30617` version preserves the connected publisher's
   non-form tags (including `maintainers`, `r`, `t`, and `u`) from that
   publisher's current, non-deleted coordinate. It never copies authority tags
@@ -166,6 +305,10 @@ event. Interpretation of that sequence uses narrower types:
   from comparing the signed request pubkey with the actual target pubkey.
 
 ## Out-of-order convergence
+
+**Build graphs and discover references independently of moderation visibility.
+Hidden parents remain graph nodes; their descendants and later updates must
+still be discoverable.**
 
 1. Query repository announcements and issue roots.
 2. Query comments using every known root event ID.
@@ -212,21 +355,21 @@ cannot label itself as bridge-signed merely by copying a `gh_user` tag. Raw
 event IDs and signing keys remain available under Technical details.
 
 For visible non-bridge authors, the client also queries kind `10011` NIP-39
-external-identity snapshots. Kind `10011` is regular replaceable: the client
-first selects exactly one winner per author by newest `created_at`, then lowest
-event ID, and only then applies deletion. It never unions claims from different
-versions or resurrects an older version when the winner was deleted. A GitHub
-claim is displayed as a link beside the existing byline only after GitHub's
-Gist API confirms that the named account owns a single-file Gist whose content
+external-identity snapshots. Select one replaceable head per author: newest
+`created_at`, then lowest event ID, and only then apply deletion. Never union
+claims across versions or resurrect an older snapshot when the head is deleted.
+A GitHub claim is displayed as a link beside the existing byline only after
+GitHub's Gist API confirms that the named account owns a single-file Gist whose
+content
 is the exact NIP-39 proof for that author's npub. Relay and GitHub verification
 run after repository activity is rendered; failure leaves the ordinary Nostr
 byline unchanged. This assertion is optional presentation metadata. It never
 authorizes a bridge crossing, selects a GitHub token, or creates an account
 link. Before querying kind `10011`, the client independently reduces each
-visible author's kind `10002` NIP-65 relay-list snapshot and its exact
-deletions, then adds write-capable personal relays to the collaboration-relay
-fallback. NIP-46 signer transport relays are unrelated and are never used for
-this inference. To bound background work deterministically, one refresh
+visible author's kind `10002` NIP-65 relay-list snapshot: newest `created_at`,
+then lowest event ID, before exact deletion, without fallback to an older head.
+It then adds write-capable personal relays to the collaboration-relay fallback.
+NIP-46 signer transport relays are unrelated and are never used for this inference. To bound background work deterministically, one refresh
 considers the lexically first 256 visible author keys, at most eight canonical
 GitHub claims from each current snapshot, at most four write relays per
 author, eight collaboration relays, and twelve identity relays overall. At
@@ -244,12 +387,10 @@ Discovery is deliberately staged: an announcement may appear after repository
 content, and an issue may appear after its comments. Each newly discovered
 level unlocks the next reference-based query during that poll or the next one.
 
-Repository collaboration is anchored only by the latest non-deleted `30617`
-at the exact coordinate formed from the deployed host's NIP-05 `names._` key
-and the corresponding `projects.list` identifier. Other aliases in the
-NIP-05 `names` map do not gain repository authority. The client does not
-accept an arbitrary announcement merely because its `d` tag matches a line in
-`projects.list`.
+Repository collaboration remains anchored to the selected, non-deleted `30617`
+head at the exact `30617:<host NIP-05 names._ key>:<projects.list identifier>`
+coordinate. Other NIP-05 aliases gain no authority; a matching `d` tag alone is
+insufficient. A deleted head must not revive an older announcement.
 
 ## Limits outside the client's control
 
@@ -301,16 +442,140 @@ request.
 - The detail composer can publish the explicit NIP-34 statuses: `1630` Open,
   `1631` Resolved/Merged/Applied, `1632` Closed, and `1633` Draft. A newer Open
   status reopens a resolved, merged/applied, closed, or draft root.
-- Status publication is allowed only for the root author or a maintainer of the
-  current repository announcement. Received status events must also name both
-  the repository publisher and root author in their required `p` tags.
-- A PR author can publish a kind `1619` update with a new tip commit, clone URL,
-  and optional merge base. The newest valid author update is displayed.
+- Only the root author or a current repository maintainer may publish an
+  effective status. Received events must also name both the repository
+  publisher and root author in their required `p` tags. Among valid, non-deleted
+  statuses, newest `created_at` wins, with lowest event ID breaking ties.
+  Moderator trust grants no status authority.
+- Only the original PR author may publish an effective kind `1619` source-tip
+  update, carrying a commit, clone URL, and optional merge base. Among valid,
+  non-deleted updates, newest `created_at` wins, with lowest event ID breaking
+  ties. **Select first, then apply visibility: a hidden latest update remains
+  selected; never substitute an older source tip.** Details:
+  [first-layer ranking](#how-first-layer-ranking-actually-works) and the
+  [hidden-winner rule](#if-the-first-layer-winner-is-labeled-spam).
 - Marking a PR merged or a patch applied records the Nostr collaboration state;
   it does not modify the Git repository. A one-click Git merge requires a
   separate authenticated server write operation.
 
+## Trusted-person moderation and local visibility
+
+**This is a separate, downstream presentation layer. It never changes protocol
+selection, repository permissions, graph structure, or Git state.**
+
+**Moderation settings…** selects people whose public judgments affect this
+browser's collaboration views. Preferences are origin-local, versioned browser
+storage, independent of the Nostr signing account. Browsing and configuring
+moderation never contacts a signer. Signing in or out does not change viewing
+preferences. No moderator, maintainer, follow graph, or bridge key is trusted
+for moderation automatically.
+
+Each source is a public key (hex or npub input), a scope (all repositories or an
+exact `30617` repository coordinate), optional secure WebSocket relay hints, and
+an action for each category: **hide**, **warn**, or **ignore**. Adding the same
+key and scope updates that preference. Removing it recomputes the view from the
+cache immediately. These settings are not published or synchronized.
+
+### Label collection algebra
+
+The application convention uses NIP-32 kind `1985` events with namespace
+`org.nostr.git.moderation`. The initial categories are `spam` and
+`copyright-complaint`. A copyright complaint is a moderator's claim, not a legal
+finding. Publishing creates one category targeting one immutable event ID:
+
+    ["L", "org.nostr.git.moderation"]
+    ["l", "spam", "org.nostr.git.moderation"]
+    ["e", "<target-event-id>", "<relay-hint>"]
+
+- Recognized, explicitly namespace-qualified label pairs and exact `e` targets
+  are sets. Duplicate tags, duplicate events, and tag permutation do not alter
+  decisions. Unknown categories, unqualified labels, unrelated namespaces, and
+  free-form explanations do not create instructions.
+- Incoming events can contain multiple recognized categories and event targets;
+  each recognized category applies to each `e` target. This client does not
+  interpret `p`, `a`, `r`, or `t` label targets as author/repository bans.
+- Ordinary label events are independent assertions, **not replaceable state**.
+  There is no latest-wins rule, expiry, or approval that cancels another label.
+  Every applicable non-deleted label contributes. Hide outranks warn; ignore
+  contributes nothing. Reasons retain the signing key, category, label event
+  ID, and explanation, in deterministic presentation order.
+- A moderator withdraws their own label with kind `5`, an exact `e` target naming
+  the **label**, and optional `k=1985`. The client never copies the contribution
+  ID or repository `a` address into that deletion. The deletion must be signed
+  by the label's own author; retain it even if the label has not arrived yet.
+  Deleting a deletion request cannot restore a label. A surviving second label
+  can still hide the contribution after the first is withdrawn. Full
+  [NIP-09 authorization and tombstone rules](#replacement-and-deletion) apply.
+
+### Discovery and convergence
+
+After discovering roots, patch references, comments, and PR updates, each poll
+queries selected moderators by author, namespace, and exact target IDs. Queries
+use raw collaboration candidates, including hidden and unresolved graph members,
+not the presentation-filtered lists. Each request batch contains at most 32
+moderator keys and 128 target IDs; batches execute sequentially. No timestamp
+high-water mark excludes late-arriving old labels.
+
+Queries use repository collaboration relays followed by explicit moderator relay
+hints, respecting the existing 12-relay destination bound and locally disabled
+relays. There is no new hardcoded relay or implicit NIP-65 moderator discovery.
+A moderator whose judgments live elsewhere must provide a usable relay hint.
+
+Verified results merge into the existing event-ID cache. Every poll also queries
+exact-ID deletions for relevant cached labels, even when that poll returned no
+labels. A target, label, and label withdrawal can arrive in any order; retained
+facts are reduced again. Empty or partial responses never retract judgments.
+Settings changes during an active refresh apply immediately and queue another
+refresh; late responses may add facts but cannot reinstate an obsolete trust
+selection. Separate moderation diagnostics describe incomplete queries while
+cached judgments remain effective.
+
+The label and deletion stages finish before the newly fetched collaboration
+snapshot is rendered. This is not a guarantee against seeing as-yet undiscovered
+unwanted content: no known restriction means **no known restriction**, not
+moderator approval. The same relay retention, query-limit, and opportunistic
+browser-persistence limits described above apply to moderation.
+
+### Visibility UI and publication
+
+**Hide the selected payload, not its identity or graph position. Do not rerun
+selection to promote a runner-up. Hidden is not deleted.**
+
+Moderation applies only to collaboration payloads: issues, PRs and their updates,
+patch messages/revisions, and comments. Keep graph nodes and visible descendants
+in place. Repository announcements, workflow status selection, CI results, and
+Git refs/commits/trees remain unaffected. The
+[layer boundary and hidden-winner rule](#if-the-first-layer-winner-is-labeled-spam)
+explain why.
+
+Hidden payloads and titles are not inserted into rendered content, including
+linked previews and patch-discussion selector text. Placeholders show provenance
+and **Show anyway**. Reveal is temporary, repository/event-scoped browser memory;
+it never overrides author deletion. Counts distinguish visible, hidden, and
+deleted content; missing parents remain a separate unresolved state. Hidden
+content is excluded from optional author-identity enrichment.
+
+Preserve comment draft text and cursor selection across moderation rerenders.
+A reply whose selected target becomes hidden retains that target and draft, but
+requires reveal or an explicit new target before publishing. Never silently
+redirect the reply to a different parent.
+
+**Publish moderation label…** is separate from **Publish status**. Any signed-in
+person can publish a label; only explicitly trusting viewers apply it. After a
+relay acknowledgement, the verified label or withdrawal enters the cache and
+local visibility is recomputed immediately, before relay read-back. Existing
+signer payload validation, publication serialization, and repository-first
+publication routing are reused.
+
+Moderation is not erasure, a bandwidth filter, or copyright compliance machinery.
+Hidden events remain in the browser's verified cache and can still be retained
+and served by relays and other clients. Collaboration content remains escaped
+plaintext; this feature adds no automatic attachment or media fetching.
+
 ## Commit CI status badges
+
+**CI and moderation use separate label namespaces and trust rules. Moderation
+must neither alter CI results nor grant CI-runner authority.**
 
 Continuous-integration results for a commit are NIP-32 label events (kind
 `1985`). A CI label names the commit with a `c` tag, its namespace with an
@@ -332,18 +597,18 @@ kept as an unanswered check; it can never roll up as passed. An unqualified
 `["l", "<status>"]` is accepted only when the event carries exactly one CI
 namespace, and distinct status values on one event are ambiguous and rejected.
 
-- Authorization follows the same chain as repository state: current
-  maintainers of the accepted announcement, plus any keys it designates with
-  a `ci_runner` (or `runner`) tag. A label that names a repository through an
-  `a` tag must name this repository.
+- Only current maintainers of the accepted announcement, plus keys it designates
+  with `ci_runner` (or `runner`) tags, may publish effective CI results. A label
+  that names a repository through an `a` tag must name this repository.
 - Labels are queried on the repository's signed collaboration relays, both by
   repository address and by the commit IDs currently selectable in the code
   view, so a runner that publishes only a commit reference still converges.
   Deletion requests for discovered labels are fetched like any other content.
-- Each `(signing key, check name)` pair is one runner check. The newest
-  `created_at` wins, with the lowest event ID as the deterministic tie-break,
-  mirroring addressable replacement ordering. A valid kind `5` deletion from
-  the label's own author removes that check.
+- For each commit and `(signing key, check name)`, choose the newest authorized,
+  non-deleted report by `created_at`, with lowest event ID breaking ties. An
+  exact deletion signed by the report's author removes that report; an older
+  eligible report may then supply the check. This ordinary-event CI reduction
+  is not replaceable-head deletion semantics or moderation-label aggregation.
 - The commit banner rolls up the checks for the selected commit: any failure
   fails the commit; otherwise any pending or unrecognized check leaves it
   running; otherwise it passed. A commit with no reports shows a neutral
@@ -354,6 +619,9 @@ namespace, and distinct status values on one event are ambiguous and rejected.
   authorize a merge, or participate in the addressable state snapshot.
 
 ## Git and browser-state correctness
+
+**Moderation never changes Git refs, commits, or trees. Hiding a patch submission
+must not hide its commit from a maintainer-published branch.**
 
 - Primary interface copy uses repository concepts—issues, pull requests,
   patches, comments, statuses, branches, tags, and relays—without decorating

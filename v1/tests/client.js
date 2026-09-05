@@ -107,20 +107,23 @@ const boot = [
 ].join("\n");
 const expose = [
   "    globalThis.__clientTest = {",
+  "      MODERATION_NAMESPACE, MODERATION_SETTINGS_KEY, moderationLabelEntries,",
+  "      normalizeModerationSettings, reduceModerationLabels, moderationWithdrawalTags,",
   "      App, NostrService, activeReplaceableEvents, actorLabel,",
   "      attributionHtml, attributionLabel, buildDeletionIndex, eventIsDeleted,",
-  "      cloneUrlSetFromText, hasRepositoryOwnerTag,",
+  "      cloneUrlSetFromText, extractCiStatusEntry, hasRepositoryOwnerTag,",
   "      domainDiscoveryRelayUrls, effectiveRepositoryState,",
   "      githubNip39Claims, gistVerifiesNip39,",
   "      isNostrEventShape, isRepositoryStarReaction,",
-  "      isValidNip34CollaborationEvent, repositoryStarIdentity,",
+  "      isValidNip34CollaborationEvent, reduceCommitCiStatuses,",
+  "      repositoryStarIdentity,",
   "      repositoryUnstarTags,",
   "      latestAddressableEvents, latestReplaceableEvents, normalizeRelayUrls,",
   "      nip65ReadRelays, nip65WriteRelays,",
   "      repositoryEarliestUniqueCommit, repositoryRelayUrls,",
   "      repositoryStateMap, scalarTagValues,",
   "      uniqueNip22EventReference, uniqueTagValue,",
-  "      externalIdentityService, nostrService, verificationService",
+  "      externalIdentityService, nostrService, verificationService, gitService",
   "    };"
 ].join("\n");
 assert.ok(scripts[0][2].includes(boot), "client boot block changed");
@@ -192,6 +195,7 @@ const {
   domainDiscoveryRelayUrls,
   effectiveRepositoryState,
   eventIsDeleted,
+  extractCiStatusEntry,
   externalIdentityService,
   githubNip39Claims,
   gistVerifiesNip39,
@@ -204,6 +208,7 @@ const {
   nip65ReadRelays,
   nip65WriteRelays,
   normalizeRelayUrls,
+  reduceCommitCiStatuses,
   repositoryEarliestUniqueCommit,
   repositoryRelayUrls,
   repositoryStateMap,
@@ -539,6 +544,251 @@ ok(
   }) === null,
   "current maintainers may set status and revoked maintainers may not"
 );
+
+const ciCommit = "5".repeat(40);
+const cuirassLabel = {
+  id: "ab".repeat(32),
+  pubkey: maintainer,
+  kind: 1985,
+  created_at: 300,
+  tags: [
+    ["c", ciCommit],
+    ["L", "org.nostr.ci.status"],
+    ["l", "success", "org.nostr.ci.status"],
+    ["name", "cuirass/x86_64"],
+    ["url", "https://ci.friendly-machines.com/eval/12/dashboard"]
+  ],
+  content: "All builds succeeded."
+};
+const failingRunnerLabel = {
+  id: "ac".repeat(32),
+  pubkey: owner,
+  kind: 1985,
+  created_at: 301,
+  tags: [
+    ["c", ciCommit],
+    ["L", "ci/status"],
+    ["l", "failure", "ci/status"],
+    ["name", "guix/aarch64"]
+  ],
+  content: ""
+};
+const unauthorizedCiLabel = {
+  ...cuirassLabel,
+  id: "ad".repeat(32),
+  pubkey: attacker,
+  created_at: 999,
+  tags: [
+    ...cuirassLabel.tags,
+    ["l", "failure", "org.nostr.ci.status"]
+  ]
+};
+const deletedCiLabel = {
+  ...cuirassLabel,
+  id: "ae".repeat(32),
+  created_at: 250
+};
+const ciDeletion = {
+  id: "af".repeat(32),
+  pubkey: maintainer,
+  kind: 5,
+  created_at: 400,
+  tags: [["e", deletedCiLabel.id]],
+  content: ""
+};
+const ciDeletionIndex = buildDeletionIndex([ciDeletion]);
+ok(
+  extractCiStatusEntry(cuirassLabel)?.state === "success"
+  && extractCiStatusEntry(cuirassLabel)?.commit === ciCommit
+  && extractCiStatusEntry(failingRunnerLabel)?.state === "failure"
+  && extractCiStatusEntry({ ...cuirassLabel, kind: 1984 }) === null
+  && extractCiStatusEntry({
+    ...cuirassLabel,
+    tags: [["L", "org.nostr.ci.status"]]
+  }) === null
+  && extractCiStatusEntry({
+    ...cuirassLabel,
+    tags: [
+      ...cuirassLabel.tags,
+      ["l", "failure", "org.nostr.ci.status"]
+    ]
+  }) === null
+  && extractCiStatusEntry({
+    ...cuirassLabel,
+    tags: [
+      ...cuirassLabel.tags.filter(tag => tag[0] !== "l"),
+      ["l", "OK"]
+    ]
+  })?.state === "success"
+  && extractCiStatusEntry({
+    ...cuirassLabel,
+    tags: [
+      ...cuirassLabel.tags.filter(tag => tag[0] !== "url"),
+      ["url", "javascript:alert(1)"]
+    ]
+  })?.url === null,
+  "label extraction accepts one unambiguous CI status and rejects others"
+);
+const ciAggregates = reduceCommitCiStatuses(
+  [
+    cuirassLabel,
+    failingRunnerLabel,
+    unauthorizedCiLabel,
+    deletedCiLabel
+  ],
+  announcement,
+  ciDeletionIndex
+);
+ok(
+  ciAggregates.get(ciCommit)?.overall === "failure"
+  && ciAggregates.get(ciCommit)?.checks.length === 2
+  && ciAggregates.get(ciCommit)?.checks
+    .every(check => check.pubkey !== attacker)
+  && !ciAggregates.has("6".repeat(40)),
+  "only authorized, non-deleted runner labels reach a commit roll-up"
+);
+const stalePendingLabel = {
+  ...cuirassLabel,
+  id: "b1".repeat(32),
+  created_at: 200,
+  tags: [
+    ...cuirassLabel.tags.filter(tag => tag[0] !== "l"),
+    ["l", "pending", "org.nostr.ci.status"]
+  ]
+};
+const supersededRunner = reduceCommitCiStatuses(
+  [cuirassLabel, stalePendingLabel],
+  announcement,
+  buildDeletionIndex([])
+);
+ok(
+  supersededRunner.get(ciCommit)?.overall === "success"
+  && supersededRunner.get(ciCommit)?.checks.length === 1
+  && supersededRunner.get(ciCommit)?.checks[0].createdAt
+    === cuirassLabel.created_at,
+  "the newest label per runner and check name wins"
+);
+const runnerKey = "f".repeat(64);
+const runnerAnnouncement = {
+  ...announcement,
+  id: "b2".repeat(32),
+  tags: [
+    ["d", "dummy"],
+    ["ci_runner", runnerKey],
+    ["runner", "not-a-key"]
+  ]
+};
+const designatedRunnerLabel = {
+  ...cuirassLabel,
+  id: "b3".repeat(32),
+  pubkey: runnerKey
+};
+ok(
+  reduceCommitCiStatuses(
+    [designatedRunnerLabel],
+    runnerAnnouncement,
+    buildDeletionIndex([])
+  ).get(ciCommit)?.overall === "success"
+  && reduceCommitCiStatuses(
+    [designatedRunnerLabel],
+    announcement,
+    buildDeletionIndex([])
+  ).size === 0
+  && reduceCommitCiStatuses(
+    [cuirassLabel],
+    revokedAnnouncement,
+    buildDeletionIndex([])
+  ).size === 0,
+  "designated CI runners keep authority that revoked maintainers lose"
+);
+const foreignAddressLabel = {
+  ...cuirassLabel,
+  id: "b4".repeat(32),
+  tags: [
+    ...cuirassLabel.tags,
+    ["a", "30617:9999999999999999999999999999999999999999999999999999999999999999:other"]
+  ]
+};
+ok(
+  reduceCommitCiStatuses(
+    [foreignAddressLabel],
+    announcement,
+    buildDeletionIndex([])
+  ).size === 0,
+  "a CI label naming another repository never applies here"
+);
+const unknownStatusLabel = {
+  ...cuirassLabel,
+  id: "b5".repeat(32),
+  tags: [
+    ...cuirassLabel.tags.filter(tag => tag[0] !== "l"),
+    ["l", "cancelled", "org.nostr.ci.status"]
+  ]
+};
+ok(
+  reduceCommitCiStatuses(
+    [unknownStatusLabel],
+    announcement,
+    buildDeletionIndex([])
+  ).get(ciCommit)?.overall === "pending",
+  "an unrecognized status never rolls up as passed"
+);
+
+const ciApp = new App();
+ciApp.currentRepo = { id: "dummy" };
+ciApp.nostrData = {
+  dummy: { ciStatuses: reduceCommitCiStatuses(
+    [cuirassLabel],
+    announcement,
+    buildDeletionIndex([])
+  ) }
+};
+const ciBannerElement = { innerHTML: "" };
+const defaultGetElementById = sandbox.document.getElementById;
+sandbox.document.getElementById = id => (
+  id === "banner-ci" ? ciBannerElement : defaultGetElementById(id)
+);
+ciApp.renderCommitCiBadge(ciCommit);
+ok(
+  ciBannerElement.innerHTML.includes("passed (1)")
+  && ciBannerElement.innerHTML.includes("cuirass/x86_64")
+  && ciBannerElement.innerHTML.includes(
+    "https://ci.friendly-machines.com/eval/12/dashboard"
+  )
+  && ciBannerElement.innerHTML.includes("All builds succeeded."),
+  "the commit banner renders the passed roll-up with its check links"
+);
+const hostileLabel = {
+  ...cuirassLabel,
+  id: "b6".repeat(32),
+  content: "<script>alert(1)</script>",
+  tags: [
+    ...cuirassLabel.tags.filter(tag => tag[0] !== "name" && tag[0] !== "url"),
+    ["name", "<script>name</script>"],
+    ["url", "javascript:alert(1)"]
+  ]
+};
+ciApp.nostrData = {
+  dummy: { ciStatuses: reduceCommitCiStatuses(
+    [hostileLabel],
+    announcement,
+    buildDeletionIndex([])
+  ) }
+};
+ciApp.renderCommitCiBadge(ciCommit);
+ok(
+  !ciBannerElement.innerHTML.includes("<script>")
+  && !ciBannerElement.innerHTML.includes("javascript:")
+  && ciBannerElement.innerHTML.includes("&lt;script&gt;"),
+  "check names, descriptions, and URLs are escaped or dropped"
+);
+ciApp.nostrData = {};
+ciApp.renderCommitCiBadge(ciCommit);
+ok(
+  ciBannerElement.innerHTML.includes("no CI"),
+  "a commit without reports shows the neutral no-checks badge"
+);
+sandbox.document.getElementById = defaultGetElementById;
 
 const parent = {
   id: "5".repeat(64),
@@ -1027,6 +1277,58 @@ ok(
 );
 
 (async () => {
+  const gitService = sandbox.__clientTest.gitService;
+  const originalGitMethods = Object.fromEntries(
+    ["loadRepo", "getBranches", "getTags", "getDefaultBranch"].map(key => [key, gitService[key]])
+  );
+  const originalDocumentLookup = sandbox.document.getElementById;
+  const controls = new Map();
+  sandbox.document.getElementById = id => {
+    if (!controls.has(id)) controls.set(id, {
+      innerHTML: "old repository", textContent: "old repository", disabled: false,
+      style: {}, classList: { add() {}, remove() {}, toggle() {} }
+    });
+    return controls.get(id);
+  };
+  const repoApp = new App();
+  repoApp.currentRepo = { id: "old" };
+  repoApp.currentRef = "old-branch";
+  repoApp.clearCommitCiBadge = () => {};
+  let collaborationRepo;
+  repoApp.loadNostrTabs = () => { collaborationRepo = repoApp.currentRepo.id; };
+  const nextRepo = { id: "new", path: "new", name: "New" };
+  let rejectLoad;
+  gitService.loadRepo = () => new Promise((_resolve, reject) => { rejectLoad = reject; });
+  const loading = repoApp.ensureRepoLoaded(nextRepo);
+  assert.equal(collaborationRepo, "new", "collaboration refresh must precede Git completion");
+  assert.equal(repoApp.currentRef, null);
+  for (const id of ["branch-select", "commit-select"]) {
+    assert.equal(controls.get(id).innerHTML, "");
+    assert.equal(controls.get(id).disabled, true);
+  }
+  rejectLoad(new Error("Could not find HEAD"));
+  assert.equal(await loading, false);
+  assert.equal(repoApp.currentDir, null);
+  assert.match(controls.get("file-table-body").innerHTML, /Failed to load repository: Could not find HEAD/);
+  assert.equal(controls.get("branch-select").disabled, true);
+
+  gitService.loadRepo = async () => "/new";
+  gitService.getBranches = async () => ["main"];
+  gitService.getTags = async () => [];
+  gitService.getDefaultBranch = async () => { throw new Error("default branch failed"); };
+  assert.equal(await repoApp.ensureRepoLoaded(nextRepo), false);
+  assert.equal(repoApp.currentDir, null, "partial initialization must remain retryable");
+  gitService.getDefaultBranch = async () => "main";
+  assert.equal(await repoApp.ensureRepoLoaded(nextRepo), true);
+  assert.equal(controls.get("branch-select").disabled, false);
+  assert.equal(repoApp.currentRef, "refs/remotes/origin/main");
+  controls.get("commit-select").innerHTML = "current commits";
+  assert.equal(await repoApp.ensureRepoLoaded(nextRepo), true);
+  assert.equal(controls.get("commit-select").innerHTML, "current commits",
+    "navigation within a loaded repository must preserve controls");
+  Object.assign(gitService, originalGitMethods);
+  sandbox.document.getElementById = originalDocumentLookup;
+
   const proofAuthors = Array.from(
     {length: 33},
     (_, index) => (index + 1).toString(16).padStart(64, "0")
@@ -1413,6 +1715,243 @@ const signedPublication = async requested => {
     true,
     "publication can still require two independent acknowledgements when requested"
   );
+
+  // Moderation is a projection of retained facts, not an authority reducer.
+  const {
+    MODERATION_NAMESPACE: namespace, MODERATION_SETTINGS_KEY: settingsKey,
+    moderationLabelEntries, normalizeModerationSettings, reduceModerationLabels,
+    moderationWithdrawalTags
+  } = sandbox.__clientTest;
+  const address = `30617:${owner}:dummy`;
+  const policy = { sources: [{ pubkey: attacker, scope: address, relays: [],
+    actions: { spam: "hide", "copyright-complaint": "warn" } }] };
+  const modLabel = { ...validWireEvent, id: "a1".repeat(32), pubkey: attacker,
+    kind: 1985, tags: [["L", namespace], ["l", "spam", namespace], ["e", root.id]],
+    content: "<script>moderator explanation</script>" };
+  const withdrawal = { ...validWireEvent, id: "a2".repeat(32), pubkey: attacker,
+    kind: 5, tags: moderationWithdrawalTags(modLabel) };
+  const reduce = (events, settings = policy, repoAddress = address) =>
+    reduceModerationLabels(events, buildDeletionIndex(events), settings, repoAddress);
+  ok(reduce([modLabel]).get(root.id)?.action === "hide"
+    && reduce([modLabel], { sources: [] }).size === 0
+    && reduce([modLabel], policy, `30617:${owner}:other`).size === 0,
+    "only explicitly selected moderator keys and repository scopes affect visibility");
+  const reordered = { ...modLabel, tags: [...modLabel.tags, ...modLabel.tags].reverse() };
+  ok(JSON.stringify([...reduce([modLabel]).entries()]) === JSON.stringify([...reduce([reordered, reordered]).entries()]),
+    "label targets, qualified categories and repeated deliveries are semantic sets");
+  ok(moderationLabelEntries({ ...modLabel, tags: [["L", namespace], ["l", "spam"], ["e", root.id]] }).length === 0
+    && moderationLabelEntries({ ...modLabel, tags: [["L", namespace], ["l", "spam", "other"], ["e", root.id]] }).length === 0
+    && moderationLabelEntries({ ...modLabel, tags: [["L", namespace], ["l", "unknown", namespace], ["e", root.id]] }).length === 0,
+    "unqualified, foreign and unknown moderation labels never become instructions");
+  const permutations = values => values.length ? values.flatMap((value, i) =>
+    permutations(values.filter((_, j) => i !== j)).map(rest => [value, ...rest])) : [[]];
+  for (const sequence of permutations([root, modLabel, withdrawal])) {
+    const received = [];
+    for (const event of sequence) {
+      received.push(event);
+      const hidden = reduce(received).has(root.id);
+      assert.equal(hidden, received.includes(modLabel) && !received.includes(withdrawal));
+    }
+    assert.equal(reduce(received).size, 0);
+  }
+  ok(true, "target, label and withdrawal converge in all six arrival orders");
+  const forgedWithdrawal = { ...withdrawal, pubkey: owner };
+  const deleteDeletion = { ...validWireEvent, kind: 5, pubkey: attacker, tags: [["e", withdrawal.id]] };
+  ok(reduce([modLabel, forgedWithdrawal]).has(root.id)
+    && !reduce([modLabel, withdrawal, deleteDeletion]).has(root.id)
+    && !moderationWithdrawalTags(modLabel).some(tag => tag[0] === "a" || tag[1] === root.id),
+    "withdrawals require the label author and never delete contributions or undo tombstones");
+  const anotherLabel = { ...modLabel, id: "a3".repeat(32) };
+  const complaint = { ...modLabel, id: "a4".repeat(32), tags: [["L", namespace], ["l", "copyright-complaint", namespace], ["e", root.id]] };
+  ok(reduce([modLabel, anotherLabel, complaint]).get(root.id).reasons.length === 3
+    && reduce([modLabel, anotherLabel, complaint, withdrawal]).get(root.id).action === "hide"
+    && reduce([modLabel, complaint, withdrawal]).get(root.id).action === "warn",
+    "same-time labels are independent; withdrawing one retains others and hide outranks warn");
+  ok(normalizeModerationSettings({ sources: [policy.sources[0], policy.sources[0], { pubkey: "invalid" }] }).sources.length === 1,
+    "moderator preferences normalize duplicates and reject invalid public keys");
+
+  const modApp = new App();
+  modApp.nostrEventCache = new Map();
+  modApp.moderationSettings = policy;
+  modApp.currentRepo = { id: "dummy", name: "dummy" };
+  const secretRoot = { ...root, content: "ROOT_PAYLOAD_SECRET", tags: [...root.tags, ["subject", "ROOT_TITLE_SECRET"]] };
+  const secretParent = { ...parent, content: "PARENT_PAYLOAD_SECRET" };
+  const parentLabel = { ...modLabel, id: "a5".repeat(32), tags: [["L", namespace], ["l", "spam", namespace], ["e", parent.id]] };
+  modApp.cacheEvents([secretRoot, modLabel, parentLabel]);
+  const modData = { announcement, address, issues: [secretRoot], pullRequests: [], patchRoots: [], patches: [], prUpdates: [],
+    statuses: [], comments: [secretParent, child], stars: [], deletionIndex: buildDeletionIndex([]) };
+  modApp.nostrData = { dummy: modData };
+  modApp.nostrLoaded = true;
+  modApp.reapplyModeration();
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, { innerHTML: "", textContent: "", value: "", className: "",
+      classList: { add() {}, remove() {}, toggle() {} }, focus() {}, setSelectionRange() {} });
+    return elements.get(id);
+  };
+  sandbox.document.getElementById = element;
+  modApp.renderNostrList("issues-list", [secretRoot], modData, "Empty");
+  ok(!element("issues-list").innerHTML.includes("ROOT_PAYLOAD_SECRET")
+    && !element("issues-list").innerHTML.includes("ROOT_TITLE_SECRET")
+    && element("issues-list").innerHTML.includes("Show anyway")
+    && !element("issues-list").innerHTML.includes("<script>"),
+    "hidden list payloads and titles are absent from DOM; explanations are escaped");
+  modApp.renderThreadView(root.id, "issue");
+  const threadHtml = element("issue-detail-content").innerHTML;
+  ok(!threadHtml.includes("ROOT_PAYLOAD_SECRET") && !threadHtml.includes("ROOT_TITLE_SECRET")
+    && !threadHtml.includes("PARENT_PAYLOAD_SECRET") && threadHtml.includes(child.content)
+    && threadHtml.includes('data-depth="1"'),
+    "direct links redact root and parent payloads without suppressing visible descendants");
+  modApp.currentCommentParentId = parent.id;
+  element("issue-comment-body").value = "retained draft";
+  modApp.renderThreadView(root.id, "issue");
+  ok(modApp.commentDrafts.get(root.id) === "retained draft"
+    && modApp.currentCommentParentId === parent.id
+    && element("comment-reply-context").textContent.includes("now hidden"),
+    "a newly hidden reply target preserves the draft and relation rather than silently redirecting");
+  modApp.moderationReveals.add(`${address}:${root.id}`);
+  modApp.renderThreadView(root.id, "issue");
+  ok(element("issue-detail-content").innerHTML.includes("ROOT_PAYLOAD_SECRET")
+    && modApp.presentationCount([secretRoot, secretParent], modData) === "1 (+1 hidden)",
+    "temporary reveal restores only the selected payload and counts match visibility");
+  modApp.moderationSettings = { sources: [] };
+  modApp.reapplyModeration();
+  ok(!modApp.moderationHidden(secretParent, modData), "removing trust immediately restores cached content");
+  modApp.moderationSettings = policy;
+  modApp.cacheEvents([withdrawal]);
+  modApp.cacheEvents([]);
+  modApp.reapplyModeration();
+  const reloaded = new App();
+  ok(!modData.moderation.has(root.id)
+    && !reduce(reloaded.cachedEvents(() => true)).has(root.id),
+    "empty observations and cache reload never resurrect a withdrawn label");
+  ok(!verificationService.maintainerPubkeys(announcement).has(attacker)
+    && !verificationService.isAuthorizedStatus({ ...modLabel, kind: 1632 }, secretRoot, announcement)
+    && reduceCommitCiStatuses([modLabel], announcement, buildDeletionIndex([])).size === 0
+    && !modApp.moderationDecision(announcement, modData),
+    "moderator trust grants no repository or status authority and labels are not CI results");
+
+  const hiddenPatch = { ...patchTwo, content: "Subject: PATCH_TITLE_SECRET\nPATCH_BODY_SECRET" };
+  const hiddenRevision = { ...revisionRoot, content: "Subject: REVISION_TITLE_SECRET\nREVISION_BODY_SECRET" };
+  const patchLabel = { ...modLabel, id: "a6".repeat(32), tags: [["L", namespace], ["l", "spam", namespace], ["e", patchTwo.id], ["e", revisionRoot.id]] };
+  modApp.cacheEvents([patchLabel]);
+  Object.assign(modData, { patchRoots: [patchRoot], patches: [patchThree, hiddenPatch, patchRoot, hiddenRevision, revisionSecond] });
+  modApp.reapplyModeration();
+  modApp.renderThreadView(patchRoot.id, "patch");
+  const patchHtml = element("pr-detail-content").innerHTML;
+  ok(!patchHtml.includes("PATCH_TITLE_SECRET") && !patchHtml.includes("PATCH_BODY_SECRET")
+    && !patchHtml.includes("REVISION_TITLE_SECRET") && !patchHtml.includes("REVISION_BODY_SECRET")
+    && patchHtml.includes(patchThree.content) && patchHtml.includes(revisionSecond.content)
+    && patchHtml.includes("(hidden)"),
+    "hidden intermediate patches and revision roots retain descendants without leaking payload or selector titles");
+  const pr = { ...validWireEvent, id: "a7".repeat(32), pubkey: rootAuthor, kind: 1618, created_at: 100,
+    tags: [["a", address], ["p", owner], ["subject", "PR_TITLE_SECRET"], ["clone", "https://old.example/repo.git"], ["c", "1".repeat(40)], ["e", patchRoot.id]] };
+  const update = { ...validWireEvent, id: "a8".repeat(32), pubkey: rootAuthor, kind: 1619, created_at: 200,
+    tags: [["a", address], ["p", owner], ["E", pr.id], ["P", rootAuthor], ["clone", "https://new.example/UPDATE_SECRET.git"], ["c", "2".repeat(40)]] };
+  const updateLabel = { ...modLabel, id: "a9".repeat(32), tags: [["L", namespace], ["l", "spam", namespace], ["e", update.id]] };
+  Object.assign(modData, { pullRequests: [pr], prUpdates: [update] });
+  modApp.cacheEvents([pr, update, updateLabel]);
+  modApp.reapplyModeration();
+  modApp.renderThreadView(pr.id, "pr");
+  ok(modApp.latestPrUpdate(pr, modData).id === update.id
+    && !element("pr-detail-content").innerHTML.includes("UPDATE_SECRET")
+    && !element("pr-detail-content").innerHTML.includes("old.example")
+    && !element("pr-detail-content").innerHTML.includes("Source tip:"),
+    "hidden latest PR update withholds source data without selecting an older tip");
+  const prLabel = { ...modLabel, id: "aa".repeat(32), tags: [["L", namespace], ["l", "spam", namespace], ["e", pr.id]] };
+  modApp.cacheEvents([prLabel]);
+  modApp.reapplyModeration();
+  modApp.renderThreadView(patchRoot.id, "patch");
+  ok(!element("pr-detail-content").innerHTML.includes("PR_TITLE_SECRET"),
+    "linked PR previews do not leak hidden titles");
+  modData.deletionIndex = buildDeletionIndex([{ ...withdrawal, pubkey: rootAuthor, tags: [["e", pr.id]] }]);
+  const revealCount = modApp.moderationReveals.size;
+  modApp.revealModeratedEvent(pr.id);
+  ok(modApp.moderationReveals.size === revealCount, "Show anyway never overrides an author deletion");
+  modData.deletionIndex = buildDeletionIndex([]);
+
+  const priorFetch = clientNostrService.fetchEvents;
+  const priorModRefresh = modApp.refreshAllNostr;
+  const queryLog = [];
+  modApp.nostrEventCache = new Map([[modLabel.id, modLabel]]);
+  clientNostrService.fetchEvents = async (filters, timeout, relays, recordWarnings, onWarning) => {
+    queryLog.push({ filters, relays });
+    if (filters[0].kinds.includes(1985)) { onWarning?.("one moderator relay unavailable"); return []; }
+    return [withdrawal];
+  };
+  await modApp.refreshModerationLabels([root.id], [address], ["wss://project.example"]);
+  ok(queryLog.some(query => query.filters.some(filter => filter.kinds.includes(1985)
+      && filter.authors[0] === attacker && filter["#e"][0] === root.id && !filter["#a"]))
+    && queryLog.some(query => query.filters.some(filter => filter.kinds.includes(5) && filter["#e"].includes(modLabel.id)))
+    && modApp.moderationDiagnostics.includes("one moderator relay unavailable")
+    && eventIsDeleted(modLabel, buildDeletionIndex(modApp.cachedEvents(() => true))),
+    "empty label responses still query cached-label withdrawals and report partial moderation failures");
+  modApp.moderationSettings = { sources: [] };
+  queryLog.length = 0;
+  await modApp.refreshModerationLabels([root.id], [address], ["wss://project.example"]);
+  ok(queryLog.length === 0, "no selected moderators means no moderation relay queries");
+  modApp.moderationSettings = policy;
+  clientNostrService.fetchEvents = async filters => {
+    if (filters[0].kinds.includes(1985)) {
+      modApp.moderationSettings = { sources: [] };
+      modApp.moderationGeneration++;
+      return [modLabel];
+    }
+    return [];
+  };
+  await modApp.refreshModerationLabels([root.id], [address], ["wss://project.example"]);
+  modApp.reapplyModeration();
+  ok(modData.moderation.size === 0, "late query results cannot restore a moderator removed during refresh");
+  clientNostrService.fetchEvents = priorFetch;
+  modApp.refreshAllNostr = () => {};
+  modApp.renderModerationUpdate = () => modApp.reapplyModeration();
+  modApp.setModerationSettings(policy);
+  const signedInKey = clientNostrService.pubkey;
+  clientNostrService.pubkey = null;
+  const anonymousPolicy = new App().moderationSettings;
+  clientNostrService.pubkey = signedInKey;
+  ok(anonymousPolicy.sources[0].pubkey === attacker && storage.has(settingsKey),
+    "local moderation preferences persist independently of sign-in without probing an extension");
+  const oldSignAndPublish = clientNostrService.signAndPublish;
+  const oldLogin = clientNostrService.login;
+  const oldPublicationRelays = modApp.publicationRelayUrls;
+  let publishedTemplate;
+  let publicationCount = 0;
+  clientNostrService.pubkey = attacker;
+  clientNostrService.login = async () => true;
+  modApp.publicationRelayUrls = async () => ["wss://project.example"];
+  clientNostrService.signAndPublish = async template => {
+    publishedTemplate = template;
+    publicationCount++;
+    return { ...validWireEvent, ...template, id: (publicationCount === 1 ? "ab" : "ac").repeat(32), pubkey: attacker };
+  };
+  modApp.nostrEventCache = new Map([[secretRoot.id, secretRoot]]);
+  modApp.moderationPublishContext = { id: secretRoot.id, repoId: "dummy" };
+  element("label-category").value = "spam";
+  element("label-explanation").value = "Public spam judgment";
+  await modApp.publishModerationLabel();
+  const publishedLabel = modApp.nostrEventCache.get("ab".repeat(32));
+  ok(publishedTemplate?.kind === 1985 && publishedLabel
+    && publishedTemplate.tags.some(tag => tag[0] === "e" && tag[1] === secretRoot.id)
+    && !publishedTemplate.tags.some(tag => tag[0] === "a" || tag[0] === "p")
+    && modData.moderation.has(secretRoot.id),
+    "acknowledged label publication updates visibility immediately without closing or author-banning");
+  await modApp.withdrawModerationLabel(publishedLabel.id, "dummy");
+  ok(publishedTemplate.kind === 5
+    && publishedTemplate.tags[0][1] === publishedLabel.id
+    && !modData.moderation.has(secretRoot.id)
+    && modApp.nostrEventCache.has(secretRoot.id),
+    "acknowledged label withdrawal restores visibility immediately while retaining the contribution");
+  clientNostrService.pubkey = owner;
+  await modApp.withdrawModerationLabel(publishedLabel.id, "dummy");
+  ok(publicationCount === 2, "another signer cannot publish a withdrawal through the moderation UI");
+  clientNostrService.signAndPublish = oldSignAndPublish;
+  clientNostrService.login = oldLogin;
+  clientNostrService.pubkey = signedInKey;
+  modApp.publicationRelayUrls = oldPublicationRelays;
+  modApp.refreshAllNostr = priorModRefresh;
+  sandbox.document.getElementById = originalGetElementById;
+  storage.delete(settingsKey);
 
   console.log(`\n${passed} passed, 0 failed`);
 })().catch(error => {

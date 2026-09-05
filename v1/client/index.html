@@ -464,6 +464,7 @@
       <div id="user-badge" class="nostr-user-badge">
         <span>Browsing anonymously</span>
       </div>
+      <button class="btn btn-sm" onclick="app.openModerationSettings()">Moderation settings…</button>
       <button id="nostr-sign-in-button" class="btn btn-sm btn-primary" onclick="nostrService.toggleLogin()">Sign in</button>
     </div>
   </header>
@@ -867,6 +868,11 @@
     const RELAY_QUERY_LIMIT = 5000;
     const EVENT_CACHE_KEY = "nostrgit:nip34-events:v2";
     const RELAY_SETTINGS_KEY = "nostrgit:relay-settings:v1";
+    const MODERATION_SETTINGS_KEY = "nostrgit:moderation:v1";
+    const MODERATION_NAMESPACE = "org.nostr.git.moderation";
+    const MODERATION_CATEGORIES = Object.freeze(["spam", "copyright-complaint"]);
+    const MODERATED_KINDS = new Set([1621, 1618, 1619, 1617, 1111]);
+    const MODERATION_ACTIONS = Object.freeze({ ignore: 0, warn: 1, hide: 2 });
     const NIP34_STATUS_KINDS = Object.freeze([1630, 1631, 1632, 1633]);
     const NIP34_STATUS_KIND_SET = new Set(NIP34_STATUS_KINDS);
     // NIP-32 label events carry commit CI status. The namespaces are a fixed
@@ -1494,6 +1500,101 @@
       ], settings);
     }
 
+    // Local viewing preferences are independent of signer identity and repository
+    // authority. Source order is not precedence; duplicate entries merge as sets.
+    function moderationPubkey(value) {
+      const text = String(value || "").trim();
+      if (HEX_64.test(text.toLowerCase())) return text.toLowerCase();
+      try {
+        const decoded = window.NostrTools.nip19.decode(text);
+        return decoded.type === "npub" && HEX_64.test(decoded.data)
+          ? decoded.data : null;
+      } catch (_) { return null; }
+    }
+
+    function normalizeModerationSettings(value) {
+      const sources = new Map();
+      for (const source of Array.isArray(value?.sources) ? value.sources : []) {
+        const pubkey = moderationPubkey(source?.pubkey);
+        const scope = source?.scope || "*";
+        if (!pubkey || (scope !== "*" && !/^30617:[0-9a-f]{64}:.+$/.test(scope))) continue;
+        const key = `${pubkey}:${scope}`;
+        const previous = sources.get(key);
+        const actions = {};
+        for (const category of MODERATION_CATEGORIES) {
+          const requested = source.actions?.[category];
+          const action = Object.hasOwn(MODERATION_ACTIONS, requested) ? requested : "ignore";
+          const old = previous?.actions[category] || "ignore";
+          actions[category] = MODERATION_ACTIONS[old] > MODERATION_ACTIONS[action] ? old : action;
+        }
+        sources.set(key, {
+          pubkey, scope, actions,
+          relays: normalizeRelayUrls([...(previous?.relays || []), ...normalizeRelayUrls(source.relays)])
+        });
+      }
+      return { version: 1, sources: Array.from(sources.values()).sort((a, b) => (
+        a.pubkey.localeCompare(b.pubkey) || a.scope.localeCompare(b.scope)
+      )) };
+    }
+
+    function loadModerationSettings() {
+      try {
+        return normalizeModerationSettings(JSON.parse(localStorage.getItem(MODERATION_SETTINGS_KEY) || "{}"));
+      } catch (_) { return normalizeModerationSettings({}); }
+    }
+
+    function moderationLabelEntries(event) {
+      if (event?.kind !== NIP32_LABEL_KIND
+          || !scalarTagValues(event, "L").includes(MODERATION_NAMESPACE)) return [];
+      const categories = sortedUniqueStrings((event.tags || [])
+        .filter(tag => tag[0] === "l" && tag[2] === MODERATION_NAMESPACE
+          && MODERATION_CATEGORIES.includes(tag[1]))
+        .map(tag => tag[1]));
+      const targets = scalarTagValues(event, "e").filter(id => HEX_64.test(id));
+      return targets.flatMap(target => categories.map(category => ({
+        target, category, signalId: event.id, pubkey: event.pubkey,
+        explanation: event.content
+      })));
+    }
+
+    function reduceModerationLabels(events, deletionIndex, settings, address) {
+      const decisions = new Map();
+      const sources = normalizeModerationSettings(settings).sources.filter(source => (
+        source.scope === "*" || source.scope === address
+      ));
+      // Ordinary labels are independent assertions, NOT latest-wins snapshots.
+      // Only the label author's exact-ID withdrawal removes its contribution.
+      for (const event of events) {
+        if (eventIsDeleted(event, deletionIndex)) continue;
+        const applicable = sources.filter(source => source.pubkey === event.pubkey);
+        if (applicable.length === 0) continue;
+        for (const entry of moderationLabelEntries(event)) {
+          let action = "ignore";
+          for (const source of applicable) {
+            if (MODERATION_ACTIONS[source.actions[entry.category]] > MODERATION_ACTIONS[action]) {
+              action = source.actions[entry.category];
+            }
+          }
+          if (action === "ignore") continue;
+          if (!decisions.has(entry.target)) decisions.set(entry.target, { action, reasons: new Map() });
+          const decision = decisions.get(entry.target);
+          if (MODERATION_ACTIONS[action] > MODERATION_ACTIONS[decision.action]) decision.action = action;
+          decision.reasons.set(`${entry.signalId}:${entry.category}`, { ...entry, action });
+        }
+      }
+      for (const decision of decisions.values()) {
+        decision.reasons = Array.from(decision.reasons.values()).sort((a, b) => (
+          a.pubkey.localeCompare(b.pubkey) || a.signalId.localeCompare(b.signalId)
+          || a.category.localeCompare(b.category)
+        ));
+      }
+      return decisions;
+    }
+
+    function moderationWithdrawalTags(label) {
+      return [["e", label.id], ["k", "1985"]];
+    }
+
     function isNostrEventShape(event) {
       const nowSeconds = Math.floor(Date.now() / 1000);
       return !!event
@@ -1969,7 +2070,8 @@
         filters,
         timeoutMs = 1500,
         relayUrls = this.relayUrls,
-        recordWarnings = true
+        recordWarnings = true,
+        onWarning = null
       ) {
         relayUrls = normalizeRelayUrls(relayUrls);
         if (relayUrls.length === 0) {
@@ -2009,10 +2111,10 @@
               try { ws.send(JSON.stringify(["CLOSE", subId])); } catch (_) {}
             });
             this.activeSubs.delete(subId);
-            if (recordWarnings) {
-              for (const [relayUrl, reason] of failures) {
-                this.queryWarnings.push(`${relayUrl}: ${reason}`);
-              }
+            for (const [relayUrl, reason] of failures) {
+              const warning = `${relayUrl}: ${reason}`;
+              if (recordWarnings) this.queryWarnings.push(warning);
+              onWarning?.(warning);
             }
             if (completedRelays.size === 0) {
               reject(new Error(
@@ -2741,6 +2843,10 @@ async loadRepoOnce(repoPath) {
         this.currentCommentParentId = null;
         this.commentDrafts = new Map();
         this.nostrEventCache = this.loadEventCache();
+        this.moderationSettings = loadModerationSettings();
+        this.moderationReveals = new Set();
+        this.moderationDiagnostics = [];
+        this.moderationGeneration = 0;
         this.nostrPollTimer = null;
         this.externalIdentityRelayUrls = [];
         this.domainAuthority = null;
@@ -2804,7 +2910,8 @@ async loadRepoOnce(repoPath) {
         eventIds,
         addresses,
         relayUrls,
-        recordWarnings = true
+        recordWarnings = true,
+        onWarning = null
       ) {
         const filters = [];
         const ids = sortedUniqueStrings(eventIds.filter(id => HEX_64.test(id)));
@@ -2817,9 +2924,244 @@ async loadRepoOnce(repoPath) {
           filters,
           4000,
           relayUrls,
-          recordWarnings
+          recordWarnings,
+          onWarning
         );
         this.cacheEvents(deletions);
+      }
+
+      moderationDecision(event, data) {
+        if (!MODERATED_KINDS.has(event?.kind) || !data?.address) return null;
+        return data.moderation?.get(event.id) || null;
+      }
+
+      moderationHidden(event, data) {
+        return this.moderationDecision(event, data)?.action === "hide"
+          && !this.moderationReveals.has(`${data.address}:${event.id}`);
+      }
+
+      moderationNotice(event, data) {
+        const decision = this.moderationDecision(event, data);
+        if (!decision) return "";
+        const hidden = this.moderationHidden(event, data);
+        const reasons = decision.reasons.map(reason => `
+          <li>${escapeHtml(reason.category)} · <code>${escapeHtml(reason.pubkey)}</code>
+            <br>Label: <code>${escapeHtml(reason.signalId)}</code>
+            <div>${escapeHtml(reason.explanation.slice(0, 1000))}</div>
+            ${reason.pubkey === nostrService.pubkey
+              ? `<button class="btn btn-sm" onclick="app.withdrawModerationLabel('${reason.signalId}', '${escapeHtml(hashSegment(this.currentRepo.id).replace(/'/g, "%27"))}')">Withdraw my label</button>` : ""}
+          </li>`).join("");
+        return `<div class="moderation-notice proposal-target">
+          ${hidden ? "Hidden by your moderation settings" : "Moderation warning"}:
+          ${escapeHtml(sortedUniqueStrings(decision.reasons.map(reason => reason.category)).join(", "))}
+          ${hidden ? `<button class="btn btn-sm" onclick="app.revealModeratedEvent('${event.id}')">Show anyway</button>` : ""}
+          <details><summary>Moderation reasons</summary><ul>${reasons}</ul></details>
+        </div>`;
+      }
+
+      moderationControls(event) {
+        if (!MODERATED_KINDS.has(event?.kind)) return "";
+        return `<button class="btn btn-sm" style="margin-top:8px;" onclick="app.openModerationLabel('${event.id}')">Publish moderation label…</button>`;
+      }
+
+      moderationWarningHtml() {
+        return this.moderationDiagnostics.length
+          ? `<div class="nostr-empty">Moderation refresh incomplete; cached judgments still apply. ${escapeHtml(this.moderationDiagnostics.join("; "))}</div>` : "";
+      }
+
+      presentationCount(events, data) {
+        const active = events.filter(event => !eventIsDeleted(event, data?.deletionIndex));
+        const hidden = active.filter(event => this.moderationHidden(event, data)).length;
+        const deleted = events.length - active.length;
+        return `${active.length - hidden}${hidden ? ` (+${hidden} hidden)` : ""}${deleted ? ` (+${deleted} deleted)` : ""}`;
+      }
+
+      reapplyModeration() {
+        const labels = this.cachedEvents(event => event.kind === NIP32_LABEL_KIND);
+        const deletions = buildDeletionIndex(this.cachedEvents(event => event.kind === 5));
+        for (const data of Object.values(this.nostrData)) {
+          data.moderation = reduceModerationLabels(labels, deletions, this.moderationSettings, data.address);
+        }
+      }
+
+      renderModerationUpdate() {
+        this.reapplyModeration();
+        this.renderOverview();
+        if (this.currentRepo) {
+          this.loadNostrTabs();
+          if (this.currentIssueId) this.renderThreadView(this.currentIssueId, this.currentThreadType);
+        }
+      }
+
+      revealModeratedEvent(id) {
+        const data = this.currentRepo && this.nostrData[this.currentRepo.id];
+        const event = this.nostrEventCache.get(id);
+        if (!event || !data?.address || eventIsDeleted(event, data.deletionIndex)) return;
+        this.moderationReveals.add(`${data.address}:${id}`);
+        this.renderModerationUpdate();
+      }
+
+      moderationDialog(title, body) {
+        let modal = document.getElementById("moderation-modal");
+        if (!modal) {
+          modal = document.createElement("div");
+          modal.id = "moderation-modal";
+          modal.className = "modal";
+          document.body.appendChild(modal);
+        }
+        modal.innerHTML = `<div class="modal-content"><h3>${escapeHtml(title)}</h3>${body}
+          <button class="btn" style="margin-top:12px;" onclick="document.getElementById('moderation-modal').classList.add('hidden')">Close</button></div>`;
+        modal.classList.remove("hidden");
+      }
+
+      openModerationSettings() {
+        const sources = this.moderationSettings.sources;
+        const address = this.currentRepo && this.nostrData[this.currentRepo.id]?.address;
+        this.moderationDialog("Moderation settings", `
+          <p class="form-help">These viewing preferences stay in this browser, including when you sign in or out. No one is trusted automatically. Labels do not change repository permissions or Git content.</p>
+          <ul>${sources.map((source, index) => `<li style="overflow-wrap:anywhere; margin:12px 0;">
+            <code>${escapeHtml(source.pubkey)}</code><br>${escapeHtml(source.scope === "*" ? "All repositories" : source.scope)}<br>
+            ${MODERATION_CATEGORIES.map(category => `${category}: ${source.actions[category]}`).join(" · ")}
+            <br>${escapeHtml(source.relays.join(", "))}
+            <button class="btn btn-sm" onclick="app.removeModerationSource(${index})">Remove</button>
+          </li>`).join("") || "<li>No trusted moderators.</li>"}</ul>
+          <h4>Add or update a trusted person</h4>
+          <div class="form-field"><label for="moderator-key">Public key (npub or hex)</label><input id="moderator-key" spellcheck="false"></div>
+          <div class="form-field"><label for="moderator-scope">Apply judgments to</label><select id="moderator-scope">
+            <option value="*">All repositories</option>
+            ${address ? `<option value="${escapeHtml(address)}">This repository only</option>` : ""}
+          </select></div>
+          ${MODERATION_CATEGORIES.map(category => `<div class="form-field"><label for="moderator-${category}">${category === "spam" ? "Spam" : "Copyright complaint (a claim, not a legal finding)"}</label>
+            <select id="moderator-${category}"><option value="hide">Hide</option><option value="warn">Warn</option><option value="ignore">Ignore</option></select></div>`).join("")}
+          <div class="form-field"><label for="moderator-relays">Optional moderator relays (one per line)</label><textarea id="moderator-relays" rows="2"></textarea></div>
+          <button class="btn btn-primary" onclick="app.saveModerationSource()">Save viewing preference</button>
+        `);
+      }
+
+      setModerationSettings(settings) {
+        const normalized = normalizeModerationSettings(settings);
+        // A failed persistence write must not claim that preferences were saved.
+        localStorage.setItem(MODERATION_SETTINGS_KEY, JSON.stringify(normalized));
+        this.moderationSettings = normalized;
+        this.moderationGeneration++;
+        this.moderationReveals.clear();
+        this.moderationDiagnostics = [];
+        this.renderModerationUpdate();
+        this.refreshAllNostr(false);
+      }
+
+      saveModerationSource() {
+        try {
+          const pubkey = moderationPubkey(document.getElementById("moderator-key").value);
+          if (!pubkey) throw new Error("Enter a valid npub or hexadecimal public key.");
+          const scope = document.getElementById("moderator-scope").value;
+          const actions = Object.fromEntries(MODERATION_CATEGORIES.map(category => [category, document.getElementById(`moderator-${category}`).value]));
+          const relays = relayUrlsFromText(document.getElementById("moderator-relays").value);
+          const sources = this.moderationSettings.sources.filter(source => source.pubkey !== pubkey || source.scope !== scope);
+          this.setModerationSettings({ sources: [...sources, { pubkey, scope, actions, relays }] });
+          this.openModerationSettings();
+        } catch (error) { alert(`Could not save moderation settings: ${error.message}`); }
+      }
+
+      removeModerationSource(index) {
+        try {
+          this.setModerationSettings({ sources: this.moderationSettings.sources.filter((_, i) => i !== index) });
+          this.openModerationSettings();
+        } catch (error) { alert(`Could not save moderation settings: ${error.message}`); }
+      }
+
+      async refreshModerationLabels(targetIds, addresses, repositoryRelays) {
+        const generation = this.moderationGeneration;
+        const sources = this.moderationSettings.sources.filter(source => source.scope === "*" || addresses.includes(source.scope));
+        const authors = sortedUniqueStrings(sources.map(source => source.pubkey));
+        if (!authors.length) {
+          this.moderationDiagnostics = [];
+          return;
+        }
+        const relays = prioritizedRelayUrls([repositoryRelays, sources.flatMap(source => source.relays)]);
+        const errors = [];
+        const ids = sortedUniqueStrings(targetIds.filter(id => HEX_64.test(id)));
+        // Bounded sequential batches, with no timestamp high-water mark: late
+        // labels may be older than the previous poll's latest observation.
+        for (let a = 0; a < authors.length; a += 32) {
+          for (let i = 0; i < ids.length; i += 128) {
+            try {
+              this.cacheEvents(await nostrService.fetchEvents([{
+                kinds: [NIP32_LABEL_KIND], authors: authors.slice(a, a + 32),
+                "#L": [MODERATION_NAMESPACE], "#e": ids.slice(i, i + 128)
+              }], 4000, relays, false, warning => errors.push(warning)));
+            } catch (error) { errors.push(error.message); }
+          }
+        }
+        const labels = this.cachedEvents(event => authors.includes(event.pubkey)
+          && moderationLabelEntries(event).length > 0).sort((a, b) => a.id.localeCompare(b.id));
+        for (let i = 0; i < labels.length; i += 128) {
+          try {
+            await this.fetchDeletionRequests(labels.slice(i, i + 128).map(event => event.id), [], relays, false, warning => errors.push(warning));
+          } catch (error) { errors.push(error.message); }
+        }
+        if (generation === this.moderationGeneration) this.moderationDiagnostics = sortedUniqueStrings(errors);
+      }
+
+      openModerationLabel(id) {
+        const event = this.nostrEventCache.get(id);
+        const data = this.currentRepo && this.nostrData[this.currentRepo.id];
+        if (!event || !MODERATED_KINDS.has(event.kind) || !data?.address) return;
+        this.moderationPublishContext = { id, repoId: this.currentRepo.id };
+        const deletionIndex = buildDeletionIndex(this.cachedEvents(item => item.kind === 5));
+        const ownLabels = this.cachedEvents(label => label.pubkey === nostrService.pubkey
+          && !eventIsDeleted(label, deletionIndex)
+          && moderationLabelEntries(label).some(entry => entry.target === id));
+        this.moderationDialog("Publish moderation label", `
+          <p class="form-help">This publishes a public judgment about one event. It does not delete the contribution, close it, or change Git content. Only viewers who select your key apply your judgments.</p>
+          <p style="overflow-wrap:anywhere;">Target: <code>${escapeHtml(id)}</code></p>
+          <div class="form-field"><label for="label-category">Category</label><select id="label-category"><option value="spam">Spam</option><option value="copyright-complaint">Copyright complaint (not a legal finding)</option></select></div>
+          <div class="form-field"><label for="label-explanation">Optional public explanation</label><textarea id="label-explanation" rows="3" maxlength="2000"></textarea></div>
+          <button class="btn btn-primary" onclick="app.publishModerationLabel()">Publish moderation label</button>
+          ${ownLabels.map(label => `<div><code>${escapeHtml(label.id)}</code> <button class="btn btn-sm" onclick="app.withdrawModerationLabel('${label.id}', '${escapeHtml(hashSegment(this.currentRepo.id).replace(/'/g, "%27"))}')">Withdraw my label</button></div>`).join("")}
+        `);
+      }
+
+      async publishModerationLabel() {
+        try {
+          const context = this.moderationPublishContext;
+          const data = context && this.nostrData[context.repoId];
+          const target = context && this.nostrEventCache.get(context.id);
+          if (!data?.announcement || !target || !MODERATED_KINDS.has(target.kind)) throw new Error("The target is no longer available.");
+          const category = document.getElementById("label-category").value;
+          if (!MODERATION_CATEGORIES.includes(category)) throw new Error("Unsupported category.");
+          const content = document.getElementById("label-explanation").value.trim().slice(0, 2000);
+          const relays = await this.publicationRelayUrls(data.announcement);
+          const signed = await nostrService.signAndPublish({
+            kind: NIP32_LABEL_KIND,
+            tags: [["L", MODERATION_NAMESPACE], ["l", category, MODERATION_NAMESPACE],
+              ["e", target.id, repositoryRelayUrls(data.announcement)[0] || ""]],
+            content
+          }, relays);
+          this.cacheEvents([signed]);
+          this.renderModerationUpdate();
+          document.getElementById("moderation-modal")?.classList.add("hidden");
+          this.refreshAllNostr(false);
+        } catch (error) { alert(`Could not publish label: ${error.message}`); }
+      }
+
+      async withdrawModerationLabel(id, encodedRepoId) {
+        try {
+          const label = this.nostrEventCache.get(id);
+          const repoId = encodedRepoId ? decodeHashSegment(encodedRepoId) : this.currentRepo?.id;
+          const data = repoId && this.nostrData[repoId];
+          if (!label || !moderationLabelEntries(label).length || !data?.announcement) throw new Error("The label is no longer available.");
+          if (!await nostrService.login(false) || nostrService.pubkey !== label.pubkey) throw new Error("Only the label author may withdraw it.");
+          const relays = await this.publicationRelayUrls(data.announcement);
+          const signed = await nostrService.signAndPublish({
+            kind: 5, tags: moderationWithdrawalTags(label), content: "Moderation label withdrawn."
+          }, relays);
+          if (signed.pubkey !== label.pubkey) throw new Error("The signing account changed; the label was not withdrawn.");
+          this.cacheEvents([signed]);
+          this.renderModerationUpdate();
+          document.getElementById("moderation-modal")?.classList.add("hidden");
+          this.refreshAllNostr(false);
+        } catch (error) { alert(`Could not withdraw label: ${error.message}`); }
       }
 
       async nip65HeadsForAuthors(pubkeys, relayUrls) {
@@ -2919,6 +3261,7 @@ async loadRepoOnce(repoPath) {
               if (
                 event?.pubkey !== FRIENDLY_MACHINES_BRIDGE_PUBKEY
                 && !eventIsDeleted(event, data.deletionIndex)
+                && !this.moderationHidden(event, data)
               ) {
                 pubkeys.push(event.pubkey);
               }
@@ -4069,6 +4412,12 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             ))
           ));
 
+          // Target discovery uses raw validated candidates, never visibility-
+          // filtered roots. Hidden nodes still unlock labels and withdrawals.
+          await this.refreshModerationLabels([
+            ...collaborationEvents, ...comments, ...prUpdates
+          ].map(event => event.id).concat(referencedPatchIds), uniqueAddresses, collaborationRelays);
+
           // Announcement/state tombstones may live on either the domain
           // discovery relays or the repository relays. Keep this metadata
           // lookup separate so ordinary collaboration references are not
@@ -4230,6 +4579,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
           const relayWarnings = nostrService.takeQueryWarnings();
           this.nostrData = nextData;
+          // Apply CURRENT preferences, even if they changed during relay I/O.
+          this.reapplyModeration();
           this.nostrLoaded = true;
           this.nostrError = fetchErrors.length > 0
             ? sortedUniqueStrings(fetchErrors).join("; ")
@@ -4524,7 +4875,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ? this.patchDiscussionScopes(rootEvent, data)
           : [rootEvent];
         return scopes.reduce(
-          (count, scope) => count + this.validCommentsForRoot(scope, data).length,
+          (count, scope) => count + this.validCommentsForRoot(scope, data).filter(comment => (
+            !eventIsDeleted(comment, data.deletionIndex) && !this.moderationHidden(comment, data)
+          )).length,
           0
         );
       }
@@ -4701,7 +5054,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }
 
         container.className = "nostr-list";
-        container.innerHTML = partialWarning + events.map(event => {
+        container.innerHTML = this.moderationWarningHtml() + partialWarning + events.map(event => {
+          if (this.moderationHidden(event, data)) {
+            return `<article class="nostr-item">${this.moderationNotice(event, data)}${this.moderationControls(event)}</article>`;
+          }
           const title = uniqueTagValue(event, "subject")
             || (
               event.kind === 1621
@@ -4724,7 +5080,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const titleHtml = `<a href="#/repo/${escapeHtml(hashSegment(this.currentRepo.id))}/${detailRoute}/${escapeHtml(event.id)}">${escapeHtml(title)}</a>`;
 
           const count = this.commentCountForRoot(event, data);
-          details.push(`${count} ${count === 1 ? "comment" : "comments"}`);
+          details.push(`${count} visible ${count === 1 ? "comment" : "comments"}`);
           if (event.kind === 1617) {
             const patchGroups = this.patchGroupsForRoot(event, data);
             const patchCount = patchGroups.reduce(
@@ -4750,7 +5106,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             const branch = uniqueTagValue(event, "branch-name");
             if (branch) details.push(`Branch: ${branch}`);
             const update = this.latestPrUpdate(event, data);
-            const tip = uniqueTagValue(update || event, "c");
+            const tip = this.moderationHidden(update, data) ? null : uniqueTagValue(update || event, "c");
             if (tip) details.push(`Tip: ${tip.slice(0, 12)}…`);
             const revisedPatchId = this.revisedPatchIdForPr(event);
             if (revisedPatchId) details.push(`Revises patch: ${revisedPatchId.slice(0, 12)}…`);
@@ -4777,8 +5133,10 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                 <span class="badge ${statusClass}">${statusLabel}</span>
               </div>
               ${labelHtml ? `<div style="margin-top:10px;">${labelHtml}</div>` : ""}
+              ${this.moderationNotice(event, data)}
               ${contentHtml}
               ${technicalEventDetails(event)}
+              ${this.moderationControls(event)}
             </article>
           `;
         }).join("");
@@ -4981,7 +5339,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }
         if (!this.currentCommentParentId) this.currentCommentParentId = commentScope.id;
 
-        const title = uniqueTagValue(root, "subject")
+        const rootHidden = this.moderationHidden(root, data);
+        const title = rootHidden ? "Hidden contribution" : uniqueTagValue(root, "subject")
           || (
             root.kind === 1621
               ? "Untitled issue"
@@ -4993,7 +5352,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const [statusLabel, statusClass] = this.statusFor(root, data);
         const currentStatusKind = this.statusKindFor(root, data);
         const rootDate = new Date(root.created_at * 1000).toLocaleString();
-        const labels = scalarTagValues(root, "t")
+        const labels = (rootHidden ? [] : scalarTagValues(root, "t"))
           .filter(label => label !== "root" && label !== "root-revision");
         const labelHtml = labels.map(label => (
           `<span class="badge badge-blue">${escapeHtml(label)}</span>`
@@ -5003,8 +5362,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const targetRepositoryName = uniqueTagValue(data.announcement, "name")
           || this.currentRepo.name;
         const targetRepositoryLabel = targetRepositoryName;
-        const sourceClones = cloneUrlValues(effectivePr);
-        const prDetails = root.kind === 1618
+        const effectivePrHidden = rootHidden || this.moderationHidden(effectivePr, data);
+        const sourceClones = effectivePrHidden ? [] : cloneUrlValues(effectivePr);
+        const prDetails = effectivePrHidden ? [] : root.kind === 1618
           ? [
               `Target repository: ${targetRepositoryLabel}`,
               sourceClones.length
@@ -5034,7 +5394,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               <div class="proposal-target" style="margin-top:12px;">
                 Revises patch:
                 <a href="#/repo/${repoRouteId}/patches/${escapeHtml(revisedPatchId)}" style="color:var(--blue);">
-                  ${escapeHtml(revisedPatch ? patchSubject(revisedPatch.content) : revisedPatchId.slice(0, 12) + "…")}
+                  ${escapeHtml(revisedPatch ? (this.moderationHidden(revisedPatch, data) ? "Hidden patch" : patchSubject(revisedPatch.content)) : revisedPatchId.slice(0, 12) + "…")}
                 </a>
                 ${revisedPatch
                   ? `
@@ -5054,7 +5414,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                   ${linkedPullRequests.length === 1 ? "Revised by pull request:" : "Revised by pull requests:"}
                   <ul style="margin:6px 0 0 20px;">
                     ${linkedPullRequests.map(pr => {
-                      const prTitle = uniqueTagValue(pr, "subject") || "Untitled pull request";
+                      const prTitle = this.moderationHidden(pr, data) ? "Hidden pull request" : uniqueTagValue(pr, "subject") || "Untitled pull request";
                       return `
                         <li>
                           <a href="#/repo/${repoRouteId}/prs/${escapeHtml(pr.id)}" style="color:var(--blue);">
@@ -5092,7 +5452,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               ${series.map((patch, index) => {
                 const deleted = eventIsDeleted(patch, data.deletionIndex);
                 const patchDate = new Date(patch.created_at * 1000).toLocaleString();
-                const patchCommentCount = this.validCommentsForRoot(patch, data).length;
+                const patchCommentCount = this.presentationCount(this.validCommentsForRoot(patch, data), data);
                 const patchLabel = index === 0
                   ? (groupIndex === 0 ? "Root patch" : "Revision root")
                   : branched
@@ -5108,6 +5468,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                     </div>
                   `;
                 }
+                if (this.moderationHidden(patch, data)) {
+                  return `<div class="patch-event">${patchLabel}${this.moderationNotice(patch, data)}${this.moderationControls(patch)}</div>`;
+                }
                 return `
                   <details class="patch-event"${series.length === 1 || index === 0 ? " open" : ""}>
                     <summary>${patchLabel}: ${escapeHtml(patchSubject(patch.content))} · ${patchCommentCount} ${patchCommentCount === 1 ? "comment" : "comments"}</summary>
@@ -5116,7 +5479,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                       · ${escapeHtml(patchDate)}
                       ${parentId ? `<br>Replies to <code title="${escapeHtml(parentId)}">${escapeHtml(parentId.slice(0, 12))}…</code>` : ""}
                     </div>
+                    ${this.moderationNotice(patch, data)}
                     <pre class="patch-payload"><code>${escapeHtml(patch.content)}</code></pre>
+                    ${this.moderationControls(patch)}
                     ${technicalEventDetails(patch)}
                   </details>
                 `;
@@ -5126,7 +5491,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }).join("");
         const rootContentHtml = root.kind === 1617
           ? patchGroupsHtml
-          : `<div class="nostr-item-content">${escapeHtml(root.content || "No description.")}</div>`;
+          : rootHidden ? "" : `<div class="nostr-item-content">${escapeHtml(root.content || "No description.")}</div>`;
         const immutabilityNotice = root.kind === 1621
           ? "Issue titles and descriptions cannot be edited. Publish a correction as a comment; status can be changed below."
           : root.kind === 1618
@@ -5140,6 +5505,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               </article>
             `;
           }
+          if (this.moderationHidden(comment, data)) {
+            return `<article class="comment-item" style="margin-left:${depth * 24}px;" data-depth="${depth}">${this.moderationNotice(comment, data)}${this.moderationControls(comment)}</article>`;
+          }
           const date = new Date(comment.created_at * 1000).toLocaleString();
           return `
             <article class="comment-item" style="margin-left:${depth * 24}px;" data-depth="${depth}">
@@ -5147,7 +5515,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                 <span>${attributionHtml(comment)}</span>
                 · ${escapeHtml(date)}
               </div>
+              ${this.moderationNotice(comment, data)}
               <div class="nostr-item-content">${escapeHtml(comment.content)}</div>
+              ${this.moderationControls(comment)}
               ${technicalEventDetails(comment)}
               <button class="btn btn-sm" style="margin-top:10px;" data-parent-id="${escapeHtml(comment.id)}" onclick="app.setCommentParent(this.dataset.parentId)">Reply</button>
             </article>
@@ -5163,14 +5533,16 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
                 <select id="patch-discussion-scope" onchange="app.setPatchCommentScope(this.value)">
                   ${patchDiscussionScopes.map((patch, index) => {
                     const deleted = eventIsDeleted(patch, data.deletionIndex);
-                    const count = this.validCommentsForRoot(patch, data).length;
+                    const count = this.presentationCount(this.validCommentsForRoot(patch, data), data);
                     const revision = this.originalPatchForRevision(patch, data);
                     const patchLabel = revision
                       ? "Revision root"
                       : `Patch message ${index + 1}`;
                     const label = deleted
                       ? `${patchLabel} (deleted) — ${count} ${count === 1 ? "comment" : "comments"}`
-                      : `${patchLabel}: ${patchSubject(patch.content)} — ${count} ${count === 1 ? "comment" : "comments"}`;
+                      : this.moderationHidden(patch, data)
+                        ? `${patchLabel} (hidden) — ${count} comments`
+                        : `${patchLabel}: ${patchSubject(patch.content)} — ${count} ${count === 1 ? "comment" : "comments"}`;
                     return `<option value="${escapeHtml(patch.id)}"${patch.id === commentScope.id ? " selected" : ""}>${escapeHtml(label)}</option>`;
                   }).join("")}
                 </select>
@@ -5181,28 +5553,31 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ? `Discussion on patch message ${commentScopeIndex + 1} of ${patchDiscussionScopes.length}`
           : "Discussion";
 
-        container.innerHTML = partialWarning + `
+        container.innerHTML = this.moderationWarningHtml() + partialWarning + `
           <article class="nostr-item">
             <div class="nostr-item-header">
               <div>
                 <h3 class="nostr-item-title">${escapeHtml(title)}</h3>
                 <div class="nostr-item-meta">
-                  ${root.kind === 1621 ? "opened" : "proposed"} by <span>${attributionHtml(root)}</span>
+                  ${rootHidden ? "Hidden contribution" : `${root.kind === 1621 ? "opened" : "proposed"} by <span>${attributionHtml(root)}</span>`}
                   · ${escapeHtml(rootDate)}
                 </div>
               </div>
               <span class="badge ${statusClass}">${statusLabel}</span>
             </div>
             ${labelHtml ? `<div style="margin-top:10px;">${labelHtml}</div>` : ""}
+            ${this.moderationNotice(root, data)}
+            ${prUpdate && !rootHidden ? this.moderationNotice(prUpdate, data) + this.moderationControls(prUpdate) : ""}
             ${prDetailsHtml}
             ${relationHtml}
             ${rootContentHtml}
             <div class="nostr-item-meta" style="margin-top:12px;">${escapeHtml(immutabilityNotice)}</div>
             ${technicalEventDetails(root)}
+            ${this.moderationControls(root)}
           </article>
 
           ${patchDiscussionSelector}
-          <h3 style="margin-top:24px;">${escapeHtml(discussionLabel)} <span class="badge badge-purple">${comments.length}</span></h3>
+          <h3 style="margin-top:24px;">${escapeHtml(discussionLabel)} <span class="badge badge-purple">${this.presentationCount(comments, data)}</span></h3>
           ${unresolvedCommentCount ? `<div class="nostr-empty" style="margin-top:10px; text-align:left;">${unresolvedCommentCount} ${unresolvedCommentCount === 1 ? "comment is" : "comments are"} waiting for missing parent comments. The client will retry automatically.</div>` : ""}
           <div class="comment-tree">${commentsHtml || '<div class="nostr-empty" style="margin-top:10px;">No comments yet.</div>'}</div>
 
@@ -5245,7 +5620,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         if (!context || !cancel) return;
         const parent = commentMap.get(this.currentCommentParentId);
         context.textContent = parent
-          ? `Replying to ${authorLabel(parent)}`
+          ? this.moderationHidden(parent, this.nostrData[this.currentRepo.id])
+            ? "Reply target is now hidden. Reveal it before publishing, or cancel this reply."
+            : `Replying to ${authorLabel(parent)}`
           : root.kind === 1621
             ? "Commenting on this issue"
             : root.kind === 1618
@@ -5262,6 +5639,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         const root = this.discussionScopeFor(detailRoot, data);
         const comments = this.validCommentsForRoot(root, data);
         const commentMap = new Map(comments.map(comment => [comment.id, comment]));
+        if (this.moderationHidden(commentMap.get(parentId), data)) {
+          return alert("Reveal this comment before replying.");
+        }
         this.currentCommentParentId = commentMap.has(parentId) ? parentId : root.id;
         this.updateCommentReplyContext(root, commentMap);
         document.getElementById("issue-comment-body")?.focus();
@@ -5300,6 +5680,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const comments = this.validCommentsForRoot(root, data);
           const commentMap = new Map(comments.map(comment => [comment.id, comment]));
           const parent = commentMap.get(this.currentCommentParentId) || root;
+          if (this.moderationHidden(parent, data) || eventIsDeleted(parent, data.deletionIndex)) {
+            throw new Error("Reveal the reply target before publishing, or select another target.");
+          }
           const repositoryRelays = repositoryRelayUrls(data.announcement);
           const relayHint = repositoryRelays[0] || "";
           const relayUrls = await this.publicationRelayUrls(
@@ -5454,6 +5837,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
         const update = this.latestPrUpdate(root, data);
         const effectivePr = update || root;
+        if (this.moderationHidden(root, data) || this.moderationHidden(effectivePr, data)) {
+          return alert("Reveal the pull request and its current update before editing source fields.");
+        }
         this.prUpdateRepoId = this.currentRepo.id;
         this.prUpdateRootId = root.id;
         const targetName = uniqueTagValue(data.announcement, "name") || this.currentRepo.name;
@@ -5547,9 +5933,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         };
         this.updateStatePreview();
 
-        document.getElementById("issues-badge").textContent = data.issues.length;
-        document.getElementById("prs-badge").textContent = data.pullRequests.length;
-        document.getElementById("patches-badge").textContent = data.patchRoots.length;
+        document.getElementById("issues-badge").textContent = this.presentationCount(data.issues, data);
+        document.getElementById("prs-badge").textContent = this.presentationCount(data.pullRequests, data);
+        document.getElementById("patches-badge").textContent = this.presentationCount(data.patchRoots, data);
         if (this.currentCommitOid) {
           this.renderCommitCiBadge(this.currentCommitOid);
         }
@@ -5899,7 +6285,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               </div>
               <div class="repo-summary-item">
                 <span>🐞 Issues:</span>
-                <strong>${data.issues.length}</strong>
+                <strong>${this.presentationCount(data.issues, data)}</strong>
               </div>
 
               <div style="margin-top:16px; display:flex; gap:8px;">
@@ -5957,6 +6343,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           : null;
         if (rootPatchId && !revisionPatch) {
           return alert("The root patch is no longer available.");
+        }
+        if (revisionPatch && this.moderationHidden(revisionPatch, data)) {
+          return alert("Reveal the patch before converting it.");
         }
         const revisionChanged = this.prRevisionPatchId !== (revisionPatch?.id || null);
         this.prModalRepoId = nextRepoId;
