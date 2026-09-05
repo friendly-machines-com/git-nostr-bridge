@@ -5,6 +5,7 @@ This behavior follows
 [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md),
 [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md), and
 [NIP-34](https://github.com/nostr-protocol/nips/blob/master/34.md),
+[NIP-32](https://github.com/nostr-protocol/nips/blob/master/32.md),
 [NIP-39](https://github.com/nostr-protocol/nips/blob/master/39.md), and
 [NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md).
 
@@ -53,6 +54,8 @@ that key every repository permission. The client applies this model:
 - In accordance with NIP-34, only the root issue/proposal author or a current
   repository maintainer can publish its effective open, resolved/merged,
   closed, or draft status.
+- Only current maintainers of the accepted announcement, or keys it
+  designates as CI runners, can publish an effective commit CI status.
 
 These checks are made while reducing received events, not merely while showing
 publication buttons. Consequently, a malicious relay or participant cannot
@@ -306,6 +309,49 @@ request.
 - Marking a PR merged or a patch applied records the Nostr collaboration state;
   it does not modify the Git repository. A one-click Git merge requires a
   separate authenticated server write operation.
+
+## Commit CI status badges
+
+Continuous-integration results for a commit are NIP-32 label events (kind
+`1985`). A CI label names the commit with a `c` tag, its namespace with an
+`L` tag, and the status with an `l` tag whose third element repeats the
+namespace:
+
+    ["c", "<40- or 64-hex commit ID>"]
+    ["L", "org.nostr.ci.status"]
+    ["l", "success", "org.nostr.ci.status"]
+    ["name", "cuirass/x86_64"]
+    ["url", "https://ci.friendly-machines.com/eval/12/dashboard"]
+
+The accepted namespaces are the fixed set `org.nostr.ci.status`, `ci/status`,
+and `nip34.ci`; any other label event is unrelated curation metadata and is
+never reduced as a CI status. Recognized statuses are success (`success`,
+`pass`, `passed`, `ok`), failure (`failure`, `fail`, `failed`, `error`), and
+pending (`pending`, `running`, `in_progress`). An unrecognized status word is
+kept as an unanswered check; it can never roll up as passed. An unqualified
+`["l", "<status>"]` is accepted only when the event carries exactly one CI
+namespace, and distinct status values on one event are ambiguous and rejected.
+
+- Authorization follows the same chain as repository state: current
+  maintainers of the accepted announcement, plus any keys it designates with
+  a `ci_runner` (or `runner`) tag. A label that names a repository through an
+  `a` tag must name this repository.
+- Labels are queried on the repository's signed collaboration relays, both by
+  repository address and by the commit IDs currently selectable in the code
+  view, so a runner that publishes only a commit reference still converges.
+  Deletion requests for discovered labels are fetched like any other content.
+- Each `(signing key, check name)` pair is one runner check. The newest
+  `created_at` wins, with the lowest event ID as the deterministic tie-break,
+  mirroring addressable replacement ordering. A valid kind `5` deletion from
+  the label's own author removes that check.
+- The commit banner rolls up the checks for the selected commit: any failure
+  fails the commit; otherwise any pending or unrecognized check leaves it
+  running; otherwise it passed. A commit with no reports shows a neutral
+  badge. The badge expands to the individual checks, each linking to the
+  runner-supplied build URL; `url` tags that are not plain `http`/`https`
+  addresses are ignored.
+- CI labels are presentation-only status. They never modify repository state,
+  authorize a merge, or participate in the addressable state snapshot.
 
 ## Git and browser-state correctness
 
