@@ -460,12 +460,14 @@
     <a href="#/" class="brand">
       ⚡ <span>NostrGit</span>
     </a>
-    <div style="display:flex; gap:12px; align-items:center;">
-      <div id="user-badge" class="nostr-user-badge">
-        <span>Browsing anonymously</span>
-      </div>
+    <div style="display:flex; gap:12px; align-items:center; justify-content:flex-end; flex-wrap:wrap; margin-left:auto;">
       <button class="btn btn-sm" onclick="app.openModerationSettings()">Moderation settings…</button>
-      <button id="nostr-sign-in-button" class="btn btn-sm btn-primary" onclick="nostrService.toggleLogin()">Sign in</button>
+      <div role="group" aria-label="Sign-in status and controls" style="display:flex; gap:8px; align-items:center;">
+        <div id="user-badge" class="nostr-user-badge">
+          <span>Browsing anonymously</span>
+        </div>
+        <button id="nostr-sign-in-button" class="btn btn-sm btn-primary" onclick="nostrService.toggleLogin()">Sign in</button>
+      </div>
     </div>
   </header>
 
