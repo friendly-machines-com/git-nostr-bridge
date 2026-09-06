@@ -3042,7 +3042,7 @@ async loadRepoOnce(repoPath) {
             <option value="*">All repositories</option>
             ${address ? `<option value="${escapeHtml(address)}">This repository only</option>` : ""}
           </select></div>
-          <h4>How labeled content appears</h4>
+          <h4>How to handle content labeled by this moderator</h4>
           ${MODERATION_CATEGORIES.map(category => `<div class="form-field"><label for="moderator-${category}">${category === "spam" ? "Spam" : "Copyright complaint (a claim, not a legal finding)"}</label>
             <select id="moderator-${category}"><option value="hide">Hide labeled content</option><option value="warn">Show content with a warning</option><option value="ignore">Don’t apply these labels</option></select></div>`).join("")}
           <div class="form-field"><label for="moderator-relays">Optional moderator relays (one per line)</label><textarea id="moderator-relays" rows="2"></textarea></div>
