@@ -461,7 +461,7 @@
       ⚡ <span>NostrGit</span>
     </a>
     <div style="display:flex; gap:12px; align-items:center; justify-content:flex-end; flex-wrap:wrap; margin-left:auto;">
-      <button class="btn btn-sm" onclick="app.openModerationSettings()">Moderation settings…</button>
+      <button class="btn btn-sm" onclick="app.openModerationSettings()">Your content filters…</button>
       <div role="group" aria-label="Sign-in status and controls" style="display:flex; gap:8px; align-items:center;">
         <div id="user-badge" class="nostr-user-badge">
           <span>Browsing anonymously</span>
@@ -3019,9 +3019,9 @@ async loadRepoOnce(repoPath) {
       openModerationSettings() {
         const sources = this.moderationSettings.sources;
         const address = this.currentRepo && this.nostrData[this.currentRepo.id]?.address;
-        this.moderationDialog("Moderation settings", `
-          <p class="form-help">These viewing preferences stay in this browser, including when you sign in or out. No one is trusted automatically. Labels do not change repository permissions or Git content.</p>
-          <h4 style="margin-top:12px;">Trusted moderators</h4>
+        this.moderationDialog("Your content filters", `
+          <p class="form-help">These choices affect only your view in this browser and stay here when you sign in or out. Only labels from moderators you select affect your view. Labels do not change repository permissions or Git content.</p>
+          <h4 style="margin-top:12px;">Whose labels you use</h4>
           <p class="form-help">${sources.length
             ? "You choose whose moderation judgments affect your view."
             : "You haven’t selected any moderators. No one else’s moderation labels affect your view. Add a moderator below to use their judgments."}</p>
@@ -3042,6 +3042,7 @@ async loadRepoOnce(repoPath) {
             <option value="*">All repositories</option>
             ${address ? `<option value="${escapeHtml(address)}">This repository only</option>` : ""}
           </select></div>
+          <h4>How labeled content appears</h4>
           ${MODERATION_CATEGORIES.map(category => `<div class="form-field"><label for="moderator-${category}">${category === "spam" ? "Spam" : "Copyright complaint (a claim, not a legal finding)"}</label>
             <select id="moderator-${category}"><option value="hide">Hide</option><option value="warn">Warn</option><option value="ignore">Ignore</option></select></div>`).join("")}
           <div class="form-field"><label for="moderator-relays">Optional moderator relays (one per line)</label><textarea id="moderator-relays" rows="2"></textarea></div>
