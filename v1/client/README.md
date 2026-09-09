@@ -668,6 +668,12 @@ must not hide its commit from a maintainer-published branch.**
   history: if an exact commit is unavailable, it reports that ID rather than
   substituting another revision. Missing ancestors do not prevent displaying
   an available commit and its files.
+- Root directory views also preview the first existing file named `README.md`,
+  `README.org`, or `README`, in that order, using the existing plaintext viewer.
+  The preview comes from the displayed commit's tree, so introductory content
+  cannot describe a different revision. The directory listing and URL stay
+  unchanged; explicit file navigation replaces the preview. Subdirectories
+  and roots without a matching file do not get an automatic preview.
 - Concurrent loads of one repository share a single fetch. Navigation
   generations prevent a slower obsolete route from overwriting the latest
   repository, ref, tree, or blob view.
