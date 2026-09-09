@@ -1748,7 +1748,9 @@
         commit: commit.toLowerCase(),
         state,
         rawStatus,
-        name: (uniqueTagValue(event, "name") || "ci").slice(0, 120),
+        // The complete name identifies the check; truncating here would merge
+        // distinct checks and could let a passing result hide a failure.
+        name: uniqueTagValue(event, "name") || "ci",
         url: safeCiCheckUrl(uniqueTagValue(event, "url")),
         description: String(event.content || "").trim().slice(0, 300),
         createdAt: event.created_at
@@ -4083,14 +4085,16 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           unknown: "?"
         };
         const checkItems = record.checks.map(check => {
-          const checkName = escapeHtml(check.name);
+          const checkName = escapeHtml(check.name.length > 120
+            ? check.name.slice(0, 120) + "…"
+            : check.name);
           const link = check.url
             ? `<a href="${escapeHtml(check.url)}" target="_blank" rel="noopener noreferrer">${checkName}</a>`
             : checkName;
           const detail = escapeHtml(
             check.description || check.rawStatus || check.state
           );
-          return `<li>${stateIcons[check.state] || "?"} ${link}: ${detail}</li>`;
+          return `<li title="${escapeHtml(check.name)}">${stateIcons[check.state] || "?"} ${link}: ${detail}</li>`;
         }).join("");
 
         target.innerHTML = `

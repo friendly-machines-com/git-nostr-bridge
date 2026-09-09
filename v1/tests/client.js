@@ -782,6 +782,48 @@ ok(
   && ciBannerElement.innerHTML.includes("&lt;script&gt;"),
   "check names, descriptions, and URLs are escaped or dropped"
 );
+const longCheckPrefix = "x".repeat(120);
+const longLinuxName = longCheckPrefix + "-linux";
+const longMacName = longCheckPrefix + "-macos";
+const longLabel = (id, name, status, created_at) => ({
+  ...cuirassLabel, id, created_at,
+  tags: [
+    ...cuirassLabel.tags.filter(tag => tag[0] !== "name" && tag[0] !== "l"),
+    ["name", name], ["l", status, "org.nostr.ci.status"]
+  ]
+});
+const longLinuxFailure = longLabel("c1".repeat(32), longLinuxName, "failure", 100);
+const longMacSuccess = longLabel("c2".repeat(32), longMacName, "success", 200);
+const longChecks = reduceCommitCiStatuses(
+  [longLinuxFailure, longMacSuccess], announcement, buildDeletionIndex([])
+);
+const reversedLongChecks = reduceCommitCiStatuses(
+  [longMacSuccess, longLinuxFailure], announcement, buildDeletionIndex([])
+);
+ok(
+  [longChecks, reversedLongChecks].every(results => {
+    const record = results.get(ciCommit);
+    return record.overall === "failure" && record.checks.length === 2
+      && record.checks.some(check => check.name === longLinuxName && check.state === "failure")
+      && record.checks.some(check => check.name === longMacName && check.state === "success");
+  }),
+  "distinct full CI names sharing 120 characters remain separate checks in either arrival order"
+);
+const updatedLongChecks = reduceCommitCiStatuses([
+  longLinuxFailure, longMacSuccess,
+  longLabel("c3".repeat(32), longLinuxName, "success", 300)
+], announcement, buildDeletionIndex([])).get(ciCommit);
+ok(updatedLongChecks.overall === "success" && updatedLongChecks.checks.length === 2,
+  "a newer report replaces only the check with the same complete name");
+ciApp.nostrData = { dummy: { ciStatuses: longChecks } };
+ciApp.renderCommitCiBadge(ciCommit);
+ok(
+  ciBannerElement.innerHTML.includes("failed (2)")
+    && ciBannerElement.innerHTML.includes(`title="${longLinuxName}"`)
+    && ciBannerElement.innerHTML.includes(`title="${longMacName}"`)
+    && ciBannerElement.innerHTML.includes(`${longCheckPrefix}…</a>`),
+  "CI display truncates long labels while preserving full names in tooltips and the failing roll-up"
+);
 ciApp.nostrData = {};
 ciApp.renderCommitCiBadge(ciCommit);
 ok(
