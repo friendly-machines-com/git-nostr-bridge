@@ -1944,6 +1944,159 @@ const signedPublication = async requested => {
     "publication can still require two independent acknowledgements when requested"
   );
 
+  // A pending operation must not adopt a newly selected page identity.
+  {
+    const originalProvider = windowObject.nostr;
+    try {
+      for (const phase of ["connection", "signing"]) {
+        const service = new NostrService();
+        service.pubkey = attacker;
+        let resume;
+        let started;
+        const waiting = new Promise(resolve => { started = resolve; });
+        const pause = () => { started(); return new Promise(resolve => { resume = resolve; }); };
+        service.ensureConnected = phase === "connection" ? pause : async () => {};
+        let sends = 0;
+        service.sockets.set(acceptingRelay, { readyState: 1, send() { sends++; } });
+        windowObject.nostr = {
+          getPublicKey: async () => owner,
+          signEvent: async event => {
+            if (phase === "signing") await pause();
+            return signedPublication(event);
+          }
+        };
+        const pending = service.signAndPublish({ kind: 1621, tags: [], content: "Original account" }, [acceptingRelay]);
+        const rejected = assert.rejects(pending, /different account/);
+        await waiting;
+        await service.toggleLogin();
+        await service.toggleLogin();
+        resume();
+        await rejected;
+        ok(sends === 0 && !service.publishInProgress && service.pubkey === owner,
+          `account changes during ${phase} cannot replace the expected signer or broadcast a mismatched event`);
+      }
+    } finally {
+      windowObject.nostr = originalProvider;
+    }
+  }
+
+  {
+    const originalLookup = sandbox.document.getElementById;
+    const originalPublish = clientNostrService.signAndPublish;
+    const originalAlert = sandbox.alert;
+    const elements = new Map();
+    const element = id => {
+      if (!elements.has(id)) {
+        const classes = new Set();
+        elements.set(id, { value: "", textContent: "", innerHTML: "", files: [], disabled: false,
+          classList: { add: name => classes.add(name), remove: name => classes.delete(name),
+            contains: name => classes.has(name) } });
+      }
+      return elements.get(id);
+    };
+    const alerts = [];
+    try {
+      sandbox.document.getElementById = element;
+      sandbox.alert = message => alerts.push(message);
+      for (const mode of ["unchanged", "edited", "navigated"]) {
+        const commentApp = new App();
+        const discussion = { id: "c1".repeat(32), pubkey: owner, kind: 1621, tags: [], content: "Issue" };
+        const announcement = { pubkey: owner, tags: [["relays", acceptingRelay]] };
+        Object.assign(commentApp, { currentRepo: { id: "comments" }, currentThreadType: "issue",
+          currentIssueId: discussion.id, currentCommentScopeId: discussion.id,
+          currentCommentParentId: discussion.id,
+          nostrData: { comments: { announcement, issues: [discussion], comments: [] } } });
+        commentApp.publicationRelayUrls = async () => [acceptingRelay];
+        commentApp.cacheEvents = () => {};
+        commentApp.refreshAllNostr = async () => {};
+        let finish, started, submitted;
+        const waiting = new Promise(resolve => { started = resolve; });
+        clientNostrService.signAndPublish = event => {
+          submitted = event;
+          started();
+          return new Promise(resolve => { finish = resolve; });
+        };
+        const composer = element("issue-comment-body");
+        composer.value = "  First comment  ";
+        const pending = commentApp.submitRootComment(discussion.id);
+        await waiting;
+        if (mode !== "unchanged") {
+          composer.value = "New unsent draft";
+          commentApp.setCommentDraft(discussion.id, composer.value);
+        }
+        if (mode === "navigated") {
+          commentApp.currentRepo = null;
+          commentApp.currentIssueId = null;
+          commentApp.currentCommentScopeId = null;
+        }
+        finish({ ...submitted, id: "c2".repeat(32), pubkey: owner });
+        await pending;
+        assert.equal(submitted.content, "First comment");
+        ok(mode === "unchanged"
+          ? composer.value === "" && !commentApp.commentDrafts.has(discussion.id)
+          : composer.value === "New unsent draft" && commentApp.commentDrafts.get(discussion.id) === "New unsent draft",
+          `comment acknowledgement handles the ${mode} draft without deleting newer unsent text`);
+      }
+
+      const patchText = `From ${"1".repeat(40)} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] For A\n\ndiff --git a/file b/file\n`;
+      for (const mode of ["unchanged", "reading", "signing", "same-repository"]) {
+        elements.clear();
+        const patchApp = new App();
+        const repoA = { id: "A", name: "A" }, repoB = { id: "B", name: "B" };
+        const addressA = `30617:${owner}:A`;
+        patchApp.nostrData = Object.fromEntries([repoA, repoB].map(repo => [repo.id, {
+          announcement: { pubkey: owner, tags: [["d", repo.id], ["relays", `wss://${repo.id.toLowerCase()}.example`]] },
+          address: `30617:${owner}:${repo.id}`
+        }]));
+        patchApp.currentRepo = repoA;
+        patchApp.openNewPatchModal();
+        patchApp.cacheEvents = () => {};
+        patchApp.refreshAllNostr = async () => {};
+        patchApp.publicationRelayUrls = async announcement => {
+          assert.equal(announcement, patchApp.nostrData.A.announcement);
+          return ["wss://a.example"];
+        };
+        let finishRead, finishSign, started;
+        const signingStarted = new Promise(resolve => { started = resolve; });
+        const reading = mode === "reading" || mode === "same-repository";
+        element("patch-files").files = [{ name: "0001.patch", text: () => reading
+          ? new Promise(resolve => { finishRead = resolve; }) : Promise.resolve(patchText) }];
+        let submitted;
+        clientNostrService.signAndPublish = async (event, relays) => {
+          submitted = event;
+          assert.equal(event.tags[0][1], addressA);
+          assert.equal(relays[0], "wss://a.example");
+          started();
+          if (mode === "signing") await new Promise(resolve => { finishSign = resolve; });
+          return { ...event, id: "d1".repeat(32), pubkey: owner };
+        };
+        const pending = patchApp.submitNewPatch();
+        if (mode === "signing") await signingStarted;
+        if (mode !== "unchanged") {
+          patchApp.currentRepo = mode === "same-repository" ? repoA : repoB;
+          patchApp.openNewPatchModal();
+          element("patch-content").value = "Replacement draft";
+          element("patch-files").value = "replacement.patch";
+        }
+        if (reading) finishRead(patchText);
+        if (mode === "signing") finishSign();
+        await pending;
+        assert.equal(submitted.content, patchText);
+        ok(mode === "unchanged"
+          ? element("patch-modal").classList.contains("hidden") && element("patch-content").value === ""
+          : !element("patch-modal").classList.contains("hidden")
+            && element("patch-content").value === "Replacement draft"
+            && element("patch-files").value === "replacement.patch",
+          `patch publication keeps target A and protects replacement dialogs (${mode})`);
+      }
+      assert(!alerts.some(message => /Could not|Failed|Invalid/.test(message)), alerts.join("\n"));
+    } finally {
+      sandbox.document.getElementById = originalLookup;
+      clientNostrService.signAndPublish = originalPublish;
+      sandbox.alert = originalAlert;
+    }
+  }
+
   // Moderation is a projection of retained facts, not an authority reducer.
   const {
     MODERATION_NAMESPACE: namespace, MODERATION_SETTINGS_KEY: settingsKey,
