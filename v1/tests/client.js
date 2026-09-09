@@ -450,6 +450,33 @@ ok(
   "domain discovery and repository collaboration relays remain separate roles"
 );
 
+{
+  const disabled = Array.from({ length: 12 }, (_, index) => (
+    `wss://a-disabled-${String(index).padStart(2, "0")}.example`
+  ));
+  const enabled = Array.from({ length: 14 }, (_, index) => (
+    `wss://z-enabled-${String(index).padStart(2, "0")}.example`
+  ));
+  const settings = { disabledRelays: disabled };
+  const candidateUrls = [...disabled, ...enabled];
+  const announcementWithRelays = urls => ({ ...announcement, tags: [["relays", ...urls]] });
+  const expected = enabled.slice(0, 12).join(",");
+  ok(repositoryRelayUrls(announcementWithRelays([...disabled, enabled[0]]), settings).join(",") === enabled[0],
+    "disabled repository hints cannot crowd out the sole enabled relay beyond the first twelve candidates");
+  ok(repositoryRelayUrls(announcementWithRelays(candidateUrls), settings).join(",") === expected
+    && repositoryRelayUrls(announcementWithRelays([...candidateUrls].reverse().concat(candidateUrls)), settings).join(",") === expected
+    && domainDiscoveryRelayUrls({ relays: candidateUrls }, settings).join(",") === expected,
+    "relay selection filters the full candidate set before its twelve-destination cap regardless of duplicates or order");
+  const prioritySettings = {
+    disabledRelays: disabled,
+    discoveryRelays: [enabled[0], "wss://b-discovery.example"],
+    additionalRelays: [enabled[0], "wss://c-additional.example"]
+  };
+  ok(domainDiscoveryRelayUrls({ relays: [...disabled, enabled[0]] }, prioritySettings).join(",")
+    === [enabled[0], "wss://b-discovery.example", "wss://c-additional.example"].join(","),
+    "filtering before the cap preserves relay-group priority and deduplicates across groups");
+}
+
 ok(
   cloneUrlSetFromText("https://z.example/x.git\nhttps://a.example/x.git\nhttps://z.example/x.git")
     .join(",") === "https://a.example/x.git,https://z.example/x.git",

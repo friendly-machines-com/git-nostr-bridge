@@ -1479,7 +1479,9 @@
       const relays = [];
       const seen = new Set();
       for (const group of groups) {
-        for (const relay of normalizeRelayUrls(group)) {
+        // Disabled or previously selected hints must not consume destination
+        // slots and crowd out usable relays later in this priority group.
+        for (const relay of canonicalRelayUrls(group)) {
           if (disabled.has(relay) || seen.has(relay)) continue;
           seen.add(relay);
           relays.push(relay);
