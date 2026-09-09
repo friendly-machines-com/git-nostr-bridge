@@ -2653,11 +2653,89 @@
         this.repoDefaultBranches = new Map();
         this.loadWarnings = new Map();
         this.loadingRepos = new Map();
+        this.resettingRepos = new Map();
+        this.pendingWrites = new Map();
+        this.activeReads = new Map();
+      }
+
+      repositoryDir(repoPath) {
+        encodedRepositoryPath(repoPath); // Reject paths outside the repository namespace.
+        return `/repo-${encodeURIComponent(repoPath)}`;
+      }
+
+      runGitOperation(dir, operation, exclusive = false) {
+        const previousWrite = this.pendingWrites.get(dir);
+        const execute = () => navigator.locks?.request
+          ? navigator.locks.request(`nostrgit:git:${dir}`, { mode: exclusive ? "exclusive" : "shared" }, operation)
+          : operation();
+        if (exclusive) {
+          // New readers wait behind this writer; already-running readers finish
+          // before deletion/fetch. Web Locks extend this coordination across tabs.
+          const pending = Promise.allSettled([
+            ...(previousWrite ? [previousWrite] : []),
+            ...(this.activeReads.get(dir) || [])
+          ]).then(execute).finally(() => {
+            if (this.pendingWrites.get(dir) === pending) this.pendingWrites.delete(dir);
+          });
+          this.pendingWrites.set(dir, pending);
+          return pending;
+        }
+        if (previousWrite) return previousWrite.catch(() => {}).then(() => this.runGitOperation(dir, operation));
+        if (!this.activeReads.has(dir)) this.activeReads.set(dir, new Set());
+        const reads = this.activeReads.get(dir);
+        let result;
+        try { result = Promise.resolve(execute()); } catch (error) { result = Promise.reject(error); }
+        const pending = result.finally(() => {
+          reads.delete(pending);
+          if (!reads.size && this.activeReads.get(dir) === reads) this.activeReads.delete(dir);
+        });
+        reads.add(pending);
+        return pending;
+      }
+
+      callGit(method, options) {
+        return this.runGitOperation(options.dir, () => git[method]({ fs: this.fs, ...options }));
+      }
+
+      resetRepo(repoPath) {
+        if (this.resettingRepos.has(repoPath)) return this.resettingRepos.get(repoPath);
+        const dir = this.repositoryDir(repoPath);
+        const resetting = this.runGitOperation(dir, async () => {
+          if (!this.fs?.promises) throw new Error("The browser filesystem is unavailable.");
+          const remove = async path => {
+            let stat;
+            try { stat = await this.fs.promises.lstat(path); }
+            catch (error) { if (error.code === "ENOENT") return; throw error; }
+            // lstat avoids following symlinks into other repositories' caches.
+            if (stat.isDirectory()) {
+              for (const name of await this.fs.promises.readdir(path)) {
+                if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\u0000")) {
+                  throw new Error("Invalid entry in the repository cache.");
+                }
+                await remove(`${path}/${name}`);
+              }
+              await this.fs.promises.rmdir(path);
+            } else {
+              await this.fs.promises.unlink(path);
+            }
+          };
+          try { await remove(dir); }
+          finally {
+            this.repoDefaultBranches.delete(dir);
+            this.loadWarnings.delete(dir);
+          }
+        }, true).finally(() => {
+          if (this.resettingRepos.get(repoPath) === resetting) this.resettingRepos.delete(repoPath);
+        });
+        this.resettingRepos.set(repoPath, resetting);
+        return resetting;
       }
 
       loadRepo(repoPath) {
+        const resetting = this.resettingRepos.get(repoPath);
+        if (resetting) return resetting.then(() => this.loadRepo(repoPath));
         if (this.loadingRepos.has(repoPath)) return this.loadingRepos.get(repoPath);
-        const loading = this.loadRepoOnce(repoPath).finally(() => {
+        const loading = this.runGitOperation(this.repositoryDir(repoPath), () => this.loadRepoOnce(repoPath), true).finally(() => {
           if (this.loadingRepos.get(repoPath) === loading) {
             this.loadingRepos.delete(repoPath);
           }
@@ -2666,8 +2744,8 @@
         return loading;
       }
 
-async loadRepoOnce(repoPath) {
-        const dir = `/repo-${encodeURIComponent(repoPath)}`;
+      async loadRepoOnce(repoPath) {
+        const dir = this.repositoryDir(repoPath);
         if (!this.fs || !window.git) {
           throw new Error("The browser Git libraries failed to load.");
         }
@@ -2679,6 +2757,14 @@ async loadRepoOnce(repoPath) {
         }
         let hasValidCache = false;
         this.loadWarnings.delete(dir);
+        let hasGitDirectory = false;
+        try {
+          const stat = await this.fs.promises.lstat(`${dir}/.git`);
+          if (!stat.isDirectory()) throw new Error("The cached .git path is not a directory.");
+          hasGitDirectory = true;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
 
         // Validate the persistent cache, but still fetch so repeat visits do
         // not remain permanently pinned to the first downloaded revision.
@@ -2688,14 +2774,12 @@ async loadRepoOnce(repoPath) {
             const { commit } = await git.readCommit({ fs: this.fs, dir, oid: headOid });
             hasValidCache = !!(commit && commit.tree);
           }
-        } catch (e) {
-          try { await git.wipe({ fs: this.fs, dir }); } catch (_) {}
+        } catch (_) {
+          // An unreadable HEAD can mean an empty repository, missing objects,
+          // or an I/O failure. None authorizes deleting the user's cache.
         }
 
-        if (!hasValidCache) {
-          try { await git.wipe({ fs: this.fs, dir }); } catch (_) {}
-          await git.init({ fs: this.fs, dir });
-        }
+        if (!hasGitDirectory) await git.init({ fs: this.fs, dir });
         await git.addRemote({ fs: this.fs, dir, remote: 'origin', url: absoluteUrl, force: true });
 
         let fetchResult;
@@ -2716,7 +2800,8 @@ async loadRepoOnce(repoPath) {
             this.loadWarnings.set(dir, `Showing cached Git data because refresh failed: ${err.message}`);
             return dir;
           }
-          try { await git.wipe({ fs: this.fs, dir }); } catch (_) {}
+          // Keep even an incomplete cache for inspection or a later retry.
+          // Only the explicit per-repository reset action removes it.
           throw err;
         }
 
@@ -2763,14 +2848,14 @@ async loadRepoOnce(repoPath) {
       async getBranches(dir) {
         try {
           const remote = (
-            await git.listBranches({ fs: this.fs, dir, remote: "origin" }).catch(() => [])
+            await this.callGit("listBranches", { dir, remote: "origin" }).catch(() => [])
           ).filter(branch => branch && branch !== "HEAD");
           if (remote.length > 0) return sortedUniqueStrings(remote);
           if (this.repoDefaultBranches.has(dir) && this.repoDefaultBranches.get(dir) === null) {
             return [];
           }
 
-          const local = (await git.listBranches({ fs: this.fs, dir }))
+          const local = (await this.callGit("listBranches", { dir }))
             .filter(branch => branch && branch !== "HEAD");
           if (local.length > 0) return sortedUniqueStrings(local);
         } catch (e) {}
@@ -2781,8 +2866,7 @@ async loadRepoOnce(repoPath) {
         const detected = this.repoDefaultBranches.get(dir);
         if (detected && branches.includes(detected)) return detected;
         try {
-          const symbolicHead = await git.resolveRef({
-            fs: this.fs,
+          const symbolicHead = await this.callGit("resolveRef", {
             dir,
             ref: "HEAD",
             depth: 2
@@ -2797,7 +2881,7 @@ async loadRepoOnce(repoPath) {
 
       async getTags(dir) {
         try {
-          return sortedUniqueStrings(await git.listTags({ fs: this.fs, dir }));
+          return sortedUniqueStrings(await this.callGit("listTags", { dir }));
         } catch (e) {
           return [];
         }
@@ -2806,16 +2890,16 @@ async loadRepoOnce(repoPath) {
       async getTree(dir, commitOrTreeOid) {
         let treeOid = commitOrTreeOid;
         try {
-          const { commit } = await git.readCommit({ fs: this.fs, dir, oid: commitOrTreeOid });
+          const { commit } = await this.callGit("readCommit", { dir, oid: commitOrTreeOid });
           if (commit && commit.tree) treeOid = commit.tree;
         } catch (e) {}
 
-        const { tree } = await git.readTree({ fs: this.fs, dir, oid: treeOid });
+        const { tree } = await this.callGit("readTree", { dir, oid: treeOid });
         return tree;
       }
 
       async getBlobBytes(dir, oid) {
-        const { blob } = await git.readBlob({ fs: this.fs, dir, oid });
+        const { blob } = await this.callGit("readBlob", { dir, oid });
         return blob;
       }
 
@@ -2865,6 +2949,7 @@ async loadRepoOnce(repoPath) {
         this.moderationDiagnostics = [];
         this.moderationGeneration = 0;
         this.nostrPollTimer = null;
+        this.gitCacheResets = new Set();
         this.externalIdentityRelayUrls = [];
         this.domainAuthority = null;
         this.discoveryRelayUrls = [];
@@ -3752,7 +3837,7 @@ async loadRepoOnce(repoPath) {
             indicator.style.color = "var(--red)";
             indicator.textContent = `Error: ${err.message}`;
           }
-          document.getElementById("file-table-body").innerHTML = `<tr><td colspan="4" style="color:var(--red); padding:16px;">Failed to load repository: ${escapeHtml(err.message)}</td></tr>`;
+          document.getElementById("file-table-body").innerHTML = `<tr><td colspan="4" style="color:var(--red); padding:16px;">Failed to load repository: ${escapeHtml(err.message)}${this.gitCacheRecoveryHtml()}</td></tr>`;
           return false;
         }
       }
@@ -3811,7 +3896,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           let loadedCommits = [];
           if (commitRef) {
             try {
-              const result = await git.readCommit({ fs: gitService.fs, dir: this.currentDir, oid: ref });
+              const result = await gitService.callGit("readCommit", { dir: this.currentDir, oid: ref });
               loadedCommits = [{ ...result, oid: ref }];
             } catch (_) {
               throw new Error(`Commit ${ref} is not available in the fetched repository history. No other revision has been substituted.`);
@@ -3819,7 +3904,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
           if (!isCurrentNavigation()) return;
           try {
-            const history = await git.log({ fs: gitService.fs, dir: this.currentDir, ref, depth: 25 });
+            const history = await gitService.callGit("log", { dir: this.currentDir, ref, depth: 25 });
             // A shallow history may end before git.log can complete. The exact
             // requested commit is still viewable; never fall back to a ref tip.
             if (history?.length && (!commitRef || history[0].oid === ref)) loadedCommits = history;
@@ -3869,7 +3954,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }
         if (!this.currentCommitOid) return;
 
-        const { commit } = await git.readCommit({ fs: gitService.fs, dir: this.currentDir, oid: this.currentCommitOid });
+        const { commit } = await gitService.callGit("readCommit", { dir: this.currentDir, oid: this.currentCommitOid });
         if (!isCurrentNavigation()) return;
         this.pathStack = [{ name: 'root', oid: commit.tree }];
 
@@ -3936,12 +4021,52 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         this.loadNostrTabs();
       }
 
+      gitCacheRecoveryHtml() {
+        if (!this.currentRepo) return "";
+        return `<div class="form-help" style="margin-top:12px;">
+          A loading failure does not necessarily mean the cache is corrupt. Retry first.
+          Clearing removes only this repository's downloaded Git data, not remote or Nostr data.
+          <div style="margin-top:8px;">
+            <button class="btn btn-sm" onclick="app.route()">Retry loading</button>
+            <button class="btn btn-sm" data-repo-id="${escapeHtml(this.currentRepo.id)}" onclick="app.resetGitCache(this.dataset.repoId)">Clear this repository's cached Git data and retry</button>
+          </div>
+        </div>`;
+      }
+
+      async resetGitCache(repoId) {
+        const repo = this.repositories.find(candidate => candidate.id === repoId);
+        if (!repo || this.gitCacheResets.has(repoId)) return;
+        if (!window.confirm(`Clear the downloaded Git cache for “${repo.name}” and retry?\n\nOther repositories, Nostr events, settings, and remote Git data are not removed. This repository must be downloaded again and may be unavailable while offline.`)) return;
+        this.gitCacheResets.add(repoId);
+        const generation = this.currentRepo?.id === repoId ? ++this.navigationGeneration : null;
+        if (generation !== null) {
+          // Obsolete readers may finish, but must not repaint the reset view.
+          this.resetRepositoryGitView();
+          document.getElementById("file-table-body").innerHTML = '<tr><td colspan="4">Waiting for Git operations and clearing this repository’s cache…</td></tr>';
+        }
+        try {
+          await gitService.resetRepo(repo.path);
+          if (generation !== null && generation === this.navigationGeneration && this.currentRepo?.id === repoId) {
+            await this.route();
+          }
+        } catch (error) {
+          const message = `Could not reset the Git cache for “${repo.name}”: ${error.message}`;
+          if (generation !== null && generation === this.navigationGeneration && this.currentRepo?.id === repoId) {
+            this.renderGitError(new Error(message));
+          }
+          alert(message);
+        } finally {
+          this.gitCacheResets.delete(repoId);
+        }
+      }
+
       renderGitError(error) {
         this.showTabElement("code");
         document.getElementById("file-viewer").classList.add("hidden");
         document.getElementById("file-table-body").innerHTML = `
           <tr><td colspan="4" style="padding:16px; color:var(--red);">
             Could not display Git data: ${escapeHtml(error?.message || error)}
+            ${this.gitCacheRecoveryHtml()}
           </td></tr>
         `;
         const indicator = document.getElementById("loading-git-indicator");
@@ -4979,7 +5104,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       async commitOidForRef(dir, ref) {
         let oid;
         try {
-          oid = await git.resolveRef({ fs: gitService.fs, dir, ref });
+          oid = await gitService.callGit("resolveRef", { dir, ref });
         } catch (_) {
           throw new Error(`Cannot resolve ${ref}.`);
         }
@@ -4994,8 +5119,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
           visitedObjects.add(oid);
           try {
-            const result = await git.readCommit({
-              fs: gitService.fs,
+            const result = await gitService.callGit("readCommit", {
               dir,
               oid
             });
@@ -5006,8 +5130,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
             return commitOid;
           } catch (commitError) {
             try {
-              const result = await git.readTag({
-                fs: gitService.fs,
+              const result = await gitService.callGit("readTag", {
                 dir,
                 oid
               });

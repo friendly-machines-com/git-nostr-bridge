@@ -677,6 +677,23 @@ must not hide its commit from a maintainer-published branch.**
 - Concurrent loads of one repository share a single fetch. Navigation
   generations prevent a slower obsolete route from overwriting the latest
   repository, ref, tree, or blob view.
+- Git load errors offer **Retry loading** and **Clear this repository's cached
+  Git data and retry**. Reset requires confirmation: an unreadable HEAD might
+  mean an empty repository or a temporary I/O failure, not corruption, and a
+  network failure is not permission to delete a usable offline cache. Failed
+  loads therefore retain existing data; only an explicit reset deletes it.
+  Reset recursively removes the selected repository's directory with
+  LightningFS `lstat`, `readdir`, `unlink`, and `rmdir`, never following symlinks
+  into other caches. Other repositories, Nostr events, local preferences, and
+  remote Git data are unaffected. Cleanup failures are shown rather than
+  swallowed, and a failed cleanup does not automatically proceed to refetch.
+  Readers and fetch/reset operations coordinate per repository; Web Locks
+  extend coordination to other tabs when available. Otherwise confirmation
+  asks users to close other tabs using this site. Reset invalidates obsolete
+  rendering work, and completion never redirects a user who navigated away.
+  A reset removes the offline copy and requires downloading it again; it
+  cannot repair remote/network failures or guarantee retrieval of old commits
+  absent from the server's fetched history.
 - Missing paths and blobs clear stale content and display an explicit error.
   Submodule entries are identified and are not passed to the blob reader.
 - NIP-34 state publication snapshots every fetched branch and tag plus the

@@ -1346,6 +1346,211 @@ ok(
 );
 
 (async () => {
+  // Reset uses real filesystem semantics, including symlinks, without touching the checkout.
+  {
+    assert.doesNotMatch(html, /git\.wipe\s*\(/, "isomorphic-git has no wipe API");
+    const GitService = sandbox.__clientTest.gitService.constructor;
+    const service = new GitService();
+    const originalGit = sandbox.git;
+    const originalWindowGit = windowObject.git;
+    const originalHttp = windowObject.GitHttp;
+    const originalLocks = sandbox.navigator.locks;
+    const temp = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "nostrgit-reset-test-"));
+    const hostPath = name => path.join(temp, name.replace(/^\/+/, ""));
+    const dirA = service.repositoryDir("team/alpha.git");
+    const dirB = service.repositoryDir("beta.git");
+    let deletes = 0;
+    let failUnlink = false;
+    service.fs = { promises: {
+      lstat: name => fs.promises.lstat(hostPath(name)),
+      readdir: name => fs.promises.readdir(hostPath(name)),
+      rmdir: async name => { deletes++; await fs.promises.rmdir(hostPath(name)); },
+      unlink: async name => {
+        if (failUnlink) throw Object.assign(new Error("cleanup denied"), { code: "EACCES" });
+        deletes++;
+        await fs.promises.unlink(hostPath(name));
+      }
+    } };
+    const seedA = () => {
+      fs.mkdirSync(hostPath(`${dirA}/.git/objects/aa`), { recursive: true });
+      fs.writeFileSync(hostPath(`${dirA}/.git/objects/aa/corrupt`), "corrupt object");
+    };
+    try {
+      seedA();
+      fs.mkdirSync(hostPath(dirB), { recursive: true });
+      fs.writeFileSync(hostPath(`${dirB}/keep`), "other repository");
+      fs.symlinkSync(hostPath(dirB), hostPath(`${dirA}/.git/sibling-link`));
+      service.repoDefaultBranches.set(dirA, "main");
+      service.loadWarnings.set(dirA, "old warning");
+      await service.resetRepo("team/alpha.git");
+      ok(!fs.existsSync(hostPath(dirA)) && fs.readFileSync(hostPath(`${dirB}/keep`), "utf8") === "other repository"
+        && !service.repoDefaultBranches.has(dirA) && !service.loadWarnings.has(dirA),
+        "Git reset deletes only the named repository and unlinks symlinks without following them");
+      await service.resetRepo("team/alpha.git");
+      assert.throws(() => service.resetRepo("../beta.git"), /Invalid relative repository path/);
+      ok(!fs.existsSync(hostPath(dirA)), "reset handles an absent cache and rejects traversal paths");
+
+      seedA();
+      let releaseRead;
+      sandbox.git = { readBlob: () => new Promise(resolve => { releaseRead = resolve; }) };
+      const reading = service.callGit("readBlob", { dir: dirA, oid: "a".repeat(40) });
+      const before = deletes;
+      const clearing = service.resetRepo("team/alpha.git");
+      let reloaded = false;
+      const originalLoadOnce = service.loadRepoOnce;
+      service.loadRepoOnce = async () => {
+        assert(!fs.existsSync(hostPath(dirA)));
+        reloaded = true;
+        return dirA;
+      };
+      const reload = service.loadRepo("team/alpha.git");
+      await Promise.resolve();
+      assert.equal(deletes, before);
+      assert.equal(reloaded, false);
+      releaseRead({ blob: new Uint8Array() });
+      await reading;
+      await clearing;
+      await reload;
+      ok(reloaded && !service.pendingWrites.size && !service.activeReads.size,
+        "reset waits for active Git reads and newly requested loads wait for reset to finish");
+
+      seedA();
+      let releaseLoad, started;
+      const loadStarted = new Promise(resolve => { started = resolve; });
+      service.loadRepoOnce = () => { started(); return new Promise(resolve => { releaseLoad = resolve; }); };
+      const loading = service.loadRepo("team/alpha.git");
+      await loadStarted;
+      const beforeFetchReset = deletes;
+      const resetAfterLoad = service.resetRepo("team/alpha.git");
+      await Promise.resolve();
+      assert.equal(deletes, beforeFetchReset);
+      releaseLoad(dirA);
+      await loading;
+      await resetAfterLoad;
+      ok(!fs.existsSync(hostPath(dirA)), "reset waits for an in-flight fetch before removing its repository");
+      service.loadRepoOnce = originalLoadOnce;
+
+      seedA();
+      failUnlink = true;
+      await assert.rejects(service.resetRepo("team/alpha.git"), /cleanup denied/);
+      ok(fs.existsSync(hostPath(dirA)) && !service.resettingRepos.size && !service.pendingWrites.size,
+        "filesystem cleanup failures propagate and release reset state for another attempt");
+      failUnlink = false;
+      const locks = [];
+      sandbox.navigator.locks = { request: async (key, options, task) => { locks.push({ key, mode: options.mode }); return task(); } };
+      sandbox.git = { readBlob: async () => ({ blob: new Uint8Array() }) };
+      await service.callGit("readBlob", { dir: dirA, oid: "a".repeat(40) });
+      await service.resetRepo("team/alpha.git");
+      ok(locks.some(lock => lock.mode === "shared") && locks.some(lock => lock.mode === "exclusive")
+        && locks.every(lock => lock.key === `nostrgit:git:${dirA}`),
+        "Git reads and destructive resets use matching shared/exclusive Web Locks when available");
+
+      seedA();
+      windowObject.git = {};
+      windowObject.GitHttp = {};
+      let initializations = 0;
+      sandbox.git = {
+        resolveRef: async () => "a".repeat(40),
+        readCommit: async () => ({ commit: { tree: "b".repeat(40) } }),
+        init: async ({ dir }) => {
+          initializations++;
+          fs.mkdirSync(hostPath(`${dir}/.git`), { recursive: true });
+          fs.writeFileSync(hostPath(`${dir}/.git/partial`), "partial fetch cache");
+        },
+        addRemote: async () => {},
+        fetch: async () => { throw new Error("network unavailable"); },
+        listBranches: async () => []
+      };
+      const beforeNetwork = deletes;
+      assert.equal(await service.loadRepo("team/alpha.git"), dirA);
+      ok(deletes === beforeNetwork && initializations === 0
+        && service.loadWarnings.get(dirA).includes("Showing cached Git data")
+        && fs.existsSync(hostPath(`${dirA}/.git/objects/aa/corrupt`)),
+        "a network failure keeps a usable cache and reports cached-data fallback");
+      sandbox.git.resolveRef = async () => { throw new Error("unreadable HEAD"); };
+      await assert.rejects(service.loadRepo("team/alpha.git"), /network unavailable/);
+      ok(deletes === beforeNetwork && initializations === 0 && fs.existsSync(hostPath(dirA)),
+        "an uncertain HEAD/read failure does not erase or reinitialize an existing Git cache");
+      await assert.rejects(service.loadRepo("fresh.git"), /network unavailable/);
+      ok(initializations === 1 && fs.existsSync(hostPath(`${service.repositoryDir("fresh.git")}/.git/partial`)),
+        "a failed first fetch retains its partial cache instead of deleting it automatically");
+      sandbox.git.fetch = async () => ({});
+      assert.equal(await service.loadRepo("fresh.git"), service.repositoryDir("fresh.git"));
+      ok(initializations === 1, "an empty/unborn repository can retry without a destructive reset");
+    } finally {
+      sandbox.git = originalGit;
+      windowObject.git = originalWindowGit;
+      windowObject.GitHttp = originalHttp;
+      sandbox.navigator.locks = originalLocks;
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }
+
+  // Destructive cache recovery requires confirmation and remains bound to its repository.
+  {
+    const service = sandbox.__clientTest.gitService;
+    const originalReset = service.resetRepo;
+    const originalConfirm = windowObject.confirm;
+    const originalLookup = sandbox.document.getElementById;
+    const originalAlert = sandbox.alert;
+    const elements = new Map();
+    const element = id => {
+      if (!elements.has(id)) elements.set(id, { innerHTML: "", textContent: "", style: {},
+        classList: { add() {}, remove() {} } });
+      return elements.get(id);
+    };
+    try {
+      sandbox.document.getElementById = element;
+      const alerts = [];
+      sandbox.alert = message => alerts.push(message);
+      const app = new App();
+      const repo = { id: "alpha", name: "Alpha", path: "team/alpha.git" };
+      app.repositories = [repo, { id: "beta", name: "Beta", path: "beta.git" }];
+      app.currentRepo = repo;
+      app.currentDir = "/old";
+      app.nostrEventCache.set("retained", { content: "Nostr data" });
+      app.resetRepositoryGitView = () => { app.currentDir = null; };
+      app.showTabElement = () => {};
+      let retries = 0, resets = 0;
+      app.route = async () => { retries++; };
+      service.resetRepo = async path => { assert.equal(path, repo.path); resets++; };
+      windowObject.confirm = () => false;
+      await app.resetGitCache(repo.id);
+      ok(resets === 0 && retries === 0 && app.currentDir === "/old",
+        "canceling cache-reset confirmation leaves the repository untouched");
+      windowObject.confirm = message => {
+        assert(message.includes("Alpha") && message.includes("offline") && message.includes("Nostr"));
+        return true;
+      };
+      await app.resetGitCache(repo.id);
+      ok(resets === 1 && retries === 1 && app.currentDir === null
+        && app.nostrEventCache.has("retained") && app.gitCacheResets.size === 0,
+        "confirmed reset invalidates the Git view and retries only that repository without removing Nostr data");
+      let finish;
+      service.resetRepo = () => new Promise(resolve => { finish = resolve; });
+      const pending = app.resetGitCache(repo.id);
+      app.currentRepo = app.repositories[1];
+      app.navigationGeneration++;
+      finish();
+      await pending;
+      ok(retries === 1 && app.currentRepo.id === "beta",
+        "finishing a reset cannot navigate away from a subsequently selected repository");
+      app.currentRepo = repo;
+      service.resetRepo = async () => { throw new Error("cleanup denied"); };
+      await app.resetGitCache(repo.id);
+      ok(retries === 1 && alerts.some(message => message.includes("cleanup denied"))
+        && element("file-table-body").innerHTML.includes("cleanup denied")
+        && element("file-table-body").innerHTML.includes("Clear this repository")
+        && app.gitCacheResets.size === 0,
+        "cleanup failure is visible, offers another attempt, and does not pretend a reload succeeded");
+    } finally {
+      service.resetRepo = originalReset;
+      windowObject.confirm = originalConfirm;
+      sandbox.document.getElementById = originalLookup;
+      sandbox.alert = originalAlert;
+    }
+  }
+
   // A response header is not completion: body reads share the original deadline.
   {
     const originalFetch = sandbox.fetch;
