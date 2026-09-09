@@ -3306,6 +3306,11 @@ async loadRepoOnce(repoPath) {
       }
 
       async refreshExternalIdentities() {
+        // Personal relay hints must obey local opt-outs too. Normalize/filter
+        // each candidate before the total cap so disabled URLs consume no slots.
+        const enabledRelays = relays => prioritizedRelayUrls(
+          sortedUniqueStrings(relays).map(relay => [relay])
+        );
         const authors = this.visibleAttributionPubkeys();
         if (authors.length === 0) return false;
         const authorSet = new Set(authors);
@@ -3328,7 +3333,7 @@ async loadRepoOnce(repoPath) {
           const freshRelayLists = await nostrService.fetchEvents(
             relayListFilters,
             2500,
-            this.externalIdentityRelayUrls,
+            enabledRelays(this.externalIdentityRelayUrls),
             false
           );
           this.cacheEvents(freshRelayLists);
@@ -3341,7 +3346,7 @@ async loadRepoOnce(repoPath) {
           await this.fetchDeletionRequests(
             relayListCandidates.map(event => event.id),
             [],
-            this.externalIdentityRelayUrls,
+            enabledRelays(this.externalIdentityRelayUrls),
             false
           );
         } catch (_) {}
@@ -3353,10 +3358,10 @@ async loadRepoOnce(repoPath) {
           NIP65_RELAY_LIST_KIND,
           relayListDeletionIndex
         );
-        const collaborationRelays = normalizeRelayUrls(
+        const collaborationRelays = enabledRelays(
           this.externalIdentityRelayUrls
         ).slice(0, 8);
-        const personalRelays = normalizeRelayUrls(
+        const personalRelays = enabledRelays(
           relayListHeads.flatMap(nip65WriteRelays)
         ).filter(relay => !collaborationRelays.includes(relay));
         const identityRelays = [
@@ -3388,7 +3393,7 @@ async loadRepoOnce(repoPath) {
           await this.fetchDeletionRequests(
             candidates.map(event => event.id),
             [],
-            identityRelays,
+            enabledRelays(identityRelays),
             false
           );
         } catch (_) {

@@ -1378,6 +1378,74 @@ ok(
   externalIdentityService.githubByPubkey.clear();
   externalIdentityService.checkedHeads.clear();
 
+  // Optional identity routing must honor the same relay opt-outs as collaboration.
+  {
+    const originalFetch = clientNostrService.fetchEvents;
+    const originalReconcile = externalIdentityService.reconcile;
+    const previousStorage = new Map(storage);
+    const settingsKey = "nostrgit:relay-settings:v1";
+    const repositoryRelay = "wss://repository.example";
+    const disabledBootstrap = "wss://disabled-bootstrap.example";
+    const personalRelays = Array.from({ length: 20 }, (_, index) => (
+      `wss://personal-${String(index).padStart(2, "0")}.example`
+    ));
+    const disabled = [disabledBootstrap, ...personalRelays.slice(0, 4)];
+    const authors = Array.from({ length: 5 }, (_, index) => (
+      (9000 + index).toString(16).padStart(64, "0")
+    ));
+    try {
+      storage.clear();
+      storage.set(settingsKey, JSON.stringify({ disabledRelays: disabled }));
+      const identityApp = new App();
+      identityApp.visibleAttributionPubkeys = () => authors;
+      // A previously assembled bootstrap list can also contain a newly disabled URL.
+      identityApp.externalIdentityRelayUrls = [disabledBootstrap, repositoryRelay];
+      identityApp.cacheEvents(authors.map((pubkey, index) => ({
+        id: (9100 + index).toString(16).padStart(64, "0"), pubkey,
+        kind: 10002, created_at: 100, content: "", sig: "0".repeat(128),
+        tags: personalRelays.slice(index * 4, index * 4 + 4).map(relay => ["r", relay, "write"])
+      })));
+      const identity = { id: "9e".repeat(32), pubkey: authors[0], kind: 10011,
+        created_at: 100, content: "", sig: "0".repeat(128), tags: [] };
+      identityApp.cacheEvents([identity]);
+      externalIdentityService.reconcile = async () => false;
+      let queries = [];
+      clientNostrService.fetchEvents = async (filters, _timeout, relays) => {
+        queries.push({ filters, relays });
+        return [];
+      };
+      await identityApp.refreshExternalIdentities();
+      const identityQuery = queries.find(query => query.filters.some(filter => filter.kinds.includes(10011)));
+      const deletionQuery = queries.find(query => query.filters.some(filter => filter["#e"]?.includes(identity.id)));
+      ok(identityQuery && deletionQuery
+        && queries.every(query => query.relays.every(relay => !disabled.includes(relay))),
+        "identity discovery and deletion queries exclude disabled bootstrap and personal write relays");
+      ok(identityQuery.relays.length === 12
+        && identityQuery.relays[0] === repositoryRelay
+        && personalRelays.slice(4, 15).every(relay => identityQuery.relays.includes(relay)),
+        "disabled identity relays consume no destination slots and repository relays retain priority");
+
+      queries = [];
+      const newlyDisabled = personalRelays[4];
+      clientNostrService.fetchEvents = async (filters, _timeout, relays) => {
+        queries.push({ filters, relays });
+        if (filters.some(filter => filter.kinds.includes(10011))) {
+          storage.set(settingsKey, JSON.stringify({ disabledRelays: [...disabled, newlyDisabled] }));
+        }
+        return [];
+      };
+      await identityApp.refreshExternalIdentities();
+      const laterDeletion = queries.find(query => query.filters.some(filter => filter["#e"]?.includes(identity.id)));
+      ok(laterDeletion && !laterDeletion.relays.includes(newlyDisabled),
+        "identity deletion discovery rechecks opt-outs changed during identity fetching");
+    } finally {
+      clientNostrService.fetchEvents = originalFetch;
+      externalIdentityService.reconcile = originalReconcile;
+      storage.clear();
+      for (const [key, value] of previousStorage) storage.set(key, value);
+    }
+  }
+
   const originalDomainLookup = verificationService.getDomainPubkeys.bind(
     verificationService
   );
