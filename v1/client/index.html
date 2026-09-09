@@ -1411,7 +1411,7 @@
       }
     }
 
-    function normalizeRelayUrls(values) {
+    function canonicalRelayUrls(values) {
       // Relay inputs cross storage, NIP-05, signed tags, and optional client
       // APIs. Treat every non-array value as an empty set: malformed optional
       // metadata must disable that source, never abort the whole refresh.
@@ -1430,9 +1430,13 @@
           relays.add(normalized);
         } catch (_) {}
       }
-      // Relay endpoints are a set. Apply the resource cap only after
-      // canonical sorting, so duplicates and input order cannot consume slots.
-      return Array.from(relays).sort().slice(0, 12);
+      return Array.from(relays).sort();
+    }
+
+    function normalizeRelayUrls(values) {
+      // Bound destination lists, not policy lists: dropping a disabled URL
+      // would silently permit contacting a relay the user opted out of.
+      return canonicalRelayUrls(values).slice(0, 12);
     }
 
     function relayUrlsFromText(value) {
@@ -1443,7 +1447,7 @@
       if (invalid.length > 0) {
         throw new Error(`Invalid secure WebSocket relay URL: ${invalid[0]}`);
       }
-      return normalizeRelayUrls(tokens);
+      return canonicalRelayUrls(tokens);
     }
 
     function normalizeRelaySettings(value) {
@@ -1454,7 +1458,7 @@
         version: 1,
         additionalRelays: normalizeRelayUrls(input.additionalRelays || []),
         discoveryRelays: normalizeRelayUrls(input.discoveryRelays || []),
-        disabledRelays: normalizeRelayUrls(input.disabledRelays || [])
+        disabledRelays: canonicalRelayUrls(input.disabledRelays || [])
       };
     }
 

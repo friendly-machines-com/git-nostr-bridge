@@ -1420,6 +1420,62 @@ ok(
   externalIdentityService.githubByPubkey.clear();
   externalIdentityService.checkedHeads.clear();
 
+  // Connection limits must not truncate the user's disabled-relay policy.
+  {
+    const originalLookup = sandbox.document.getElementById;
+    const originalAlert = sandbox.alert;
+    const previousStorage = new Map(storage);
+    const settingsKey = "nostrgit:relay-settings:v1";
+    const disabled = Array.from({ length: 25 }, (_, index) => (
+      `wss://disabled-${String(index).padStart(2, "0")}.example`
+    ));
+    const destinations = Array.from({ length: 20 }, (_, index) => (
+      `wss://enabled-${String(index).padStart(2, "0")}.example`
+    ));
+    const controls = new Map();
+    const element = id => {
+      if (!controls.has(id)) controls.set(id, { value: "", textContent: "",
+        classList: { add() {}, remove() {} } });
+      return controls.get(id);
+    };
+    const errors = [];
+    try {
+      storage.clear();
+      sandbox.document.getElementById = element;
+      sandbox.alert = message => errors.push(message);
+      element("relay-disabled").value = [...disabled].reverse().concat(disabled[0] + "/").join("\n");
+      element("relay-additional").value = destinations.join("\n");
+      element("relay-discovery").value = destinations.join("\n");
+      const settingsApp = new App();
+      settingsApp.refreshAllNostr = async () => {};
+      await settingsApp.saveRelaySettings();
+      const savedText = storage.get(settingsKey);
+      const saved = JSON.parse(savedText);
+      ok(JSON.stringify(saved.disabledRelays) === JSON.stringify(disabled),
+        "saving more than twelve disabled relays preserves every canonical URL and removes duplicates");
+      const reloadedApp = new App();
+      reloadedApp.openRelaySettings();
+      ok(element("relay-disabled").value === disabled.join("\n")
+        && disabled.every(relay => !repositoryRelayUrls({ tags: [["relays", relay]] }).includes(relay))
+        && disabled.every(relay => !domainDiscoveryRelayUrls({ relays: [relay] }).includes(relay)),
+        "reloaded disabled settings block every entry, including those beyond the destination limit");
+      ok(saved.additionalRelays.length === 12 && saved.discoveryRelays.length === 12
+        && normalizeRelayUrls(destinations).length === 12
+        && repositoryRelayUrls({ tags: [["relays", ...destinations]] }).length === 12,
+        "preserving the full blocklist does not remove outgoing relay destination limits");
+      element("relay-disabled").value += "\nhttp://invalid.example";
+      await reloadedApp.saveRelaySettings();
+      ok(storage.get(settingsKey) === savedText && errors.length === 1
+        && errors[0].includes("Invalid secure WebSocket relay URL"),
+        "invalid disabled relay input reports an error without replacing the saved blocklist");
+    } finally {
+      sandbox.document.getElementById = originalLookup;
+      sandbox.alert = originalAlert;
+      storage.clear();
+      for (const [key, value] of previousStorage) storage.set(key, value);
+    }
+  }
+
   // Optional identity routing must honor the same relay opt-outs as collaboration.
   {
     const originalFetch = clientNostrService.fetchEvents;
