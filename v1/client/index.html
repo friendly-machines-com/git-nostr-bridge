@@ -2201,7 +2201,7 @@
             "Sign-in is unavailable. Install or enable a Nostr browser extension."
           );
         }
-        if (!await this.login(false) || !this.pubkey) {
+        if (!this.pubkey && !await this.login(false)) {
           throw new Error("Sign in to publish.");
         }
         await this.ensureConnected(relayUrls);
