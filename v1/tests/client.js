@@ -1638,6 +1638,95 @@ ok(
 );
 sandbox.document.getElementById = originalGetElementById;
 
+// A ref and its history must stay paired across overlapping navigation.
+{
+  const originalGit = sandbox.git;
+  const originalGetElement = sandbox.document.getElementById;
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: "", innerHTML: "", textContent: "", disabled: false, style: {},
+      classList: { add() {}, remove() {} }
+    });
+    return elements.get(id);
+  };
+  const commitA = { oid: "a".repeat(40), commit: { message: "A", tree: "tree-a" } };
+  const commitB = { oid: "b".repeat(40), commit: { message: "B", tree: "tree-b" } };
+  const commitC = { oid: "c".repeat(40), commit: { message: "C", tree: "tree-c" } };
+  try {
+    sandbox.document.getElementById = element;
+    for (const nextBranch of ["B", "C"]) {
+      const requests = [];
+      const reads = [];
+      sandbox.git = {
+        log: ({ ref }) => new Promise((resolve, reject) => requests.push({ ref, resolve, reject })),
+        readCommit: async ({ oid }) => {
+          reads.push(oid);
+          return { commit: { tree: `tree-${oid}` } };
+        }
+      };
+      const codeApp = new App();
+      Object.assign(codeApp, {
+        currentRepo: { id: "code" }, currentDir: "/code",
+        currentBranches: ["A", "B", "C"], currentRef: "refs/remotes/origin/A",
+        commits: [commitA], currentCommitOid: commitA.oid, navigationGeneration: 1
+      });
+      codeApp.showTabElement = () => {};
+      codeApp.renderCurrentTree = async () => {};
+      codeApp.updateCommitBanner = commit => { element("banner-oid").textContent = commit.oid; };
+      const pendingB = codeApp.renderCodeView("refs/remotes/origin/B", "", null, 1);
+      ok(
+        codeApp.commits.length === 0 && codeApp.currentCommitOid === null
+          && element("commit-select").disabled
+          && element("banner-oid").textContent === "—",
+        `loading B invalidates A's history and disables stale commit selection before navigation to ${nextBranch}`
+      );
+      await codeApp.onCommitChange(commitA.oid);
+      assert.equal(codeApp.navigationGeneration, 1, "stale selector events must not cancel loading");
+      codeApp.navigationGeneration = 2;
+      const pendingNext = codeApp.renderCodeView(`refs/remotes/origin/${nextBranch}`, "", null, 2);
+      assert.equal(requests.length, 2, "overlapping navigation must load its own history");
+      if (nextBranch === "B") {
+        requests[0].resolve([commitB]);
+        await pendingB;
+        assert.equal(codeApp.commits.length, 0, "obsolete completion must not populate history");
+        assert.equal(element("commit-select").disabled, true);
+      }
+      const expected = nextBranch === "B" ? commitB : commitC;
+      requests[1].resolve([expected]);
+      await pendingNext;
+      if (nextBranch === "C") {
+        requests[0].resolve([commitB]);
+        await pendingB;
+      }
+      ok(
+        codeApp.currentRef === `refs/remotes/origin/${nextBranch}`
+          && codeApp.currentCommitOid === expected.oid
+          && codeApp.commits[0].oid === expected.oid
+          && reads.length === 1 && reads[0] === expected.oid
+          && !element("commit-select").disabled,
+        `overlapping navigation installs only ${nextBranch}'s ref and commits regardless of completion order`
+      );
+      await codeApp.onCommitChange(expected.oid);
+      assert.equal(requests.length, 2, "selecting a loaded commit should reuse its ref's history");
+      assert.equal(codeApp.currentCommitOid, expected.oid);
+
+      const pendingEmpty = codeApp.renderCodeView("refs/remotes/origin/A", "", null, ++codeApp.navigationGeneration);
+      requests[2].resolve([]);
+      await pendingEmpty;
+      ok(
+        codeApp.currentRef === "refs/remotes/origin/A"
+          && codeApp.commits.length === 0 && codeApp.currentCommitOid === null
+          && element("commit-select").disabled,
+        `an empty history after ${nextBranch} does not restore stale commits`
+      );
+    }
+  } finally {
+    sandbox.git = originalGit;
+    sandbox.document.getElementById = originalGetElement;
+  }
+}
+
 // State publication must not combine one repository's authority with another's refs.
 {
   const originalLogin = clientNostrService.login;

@@ -3753,7 +3753,20 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }
 
         if (this.commits.length === 0 || this.currentRef !== ref) {
-          this.currentRef = ref;
+          // Invalidate the old history before yielding: overlapping navigation
+          // must not mistake the previous ref's commits for the requested ref.
+          this.commits = [];
+          this.currentCommitOid = null;
+          this.pathStack = [];
+          const commitSelect = document.getElementById("commit-select");
+          commitSelect.disabled = true;
+          commitSelect.innerHTML = '<option value="">Loading commits…</option>';
+          document.getElementById("current-path-breadcrumb").textContent = "";
+          document.getElementById("file-table-body").innerHTML = '<tr><td colspan="4">Loading commits…</td></tr>';
+          document.getElementById("banner-author").textContent = "—";
+          document.getElementById("banner-msg").textContent = "Loading commits…";
+          document.getElementById("banner-oid").textContent = "—";
+          this.clearCommitCiBadge();
           const sel = document.getElementById("branch-select");
           if (sel) sel.value = ref;
 
@@ -3767,8 +3780,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
           if (!isCurrentNavigation()) return;
 
+          // Only the current navigation may install a ref and its history.
+          this.currentRef = ref;
           this.commits = loadedCommits;
-          const commitSelect = document.getElementById("commit-select");
           commitSelect.disabled = this.commits.length === 0;
           if (this.commits.length > 0) {
             commitSelect.innerHTML = this.commits.map(c => `
@@ -3990,11 +4004,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       }
 
       async onCommitChange(oid) {
+        const commitObj = this.commits.find(c => c.oid === oid);
+        // Ignore stale selector events while another ref's history is loading.
+        if (!commitObj) return;
         const navigationGeneration = ++this.navigationGeneration;
         try {
           this.currentCommitOid = oid;
-          const commitObj = this.commits.find(c => c.oid === oid);
-          if (commitObj) this.updateCommitBanner(commitObj);
+          this.updateCommitBanner(commitObj);
 
           const currentPath = this.pathStack.slice(1).map(p => p.name).join('/');
           await this.renderCodeView(
