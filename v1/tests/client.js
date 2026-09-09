@@ -1475,6 +1475,79 @@ ok(
       ).join(",") === "wss://repository.example",
       "empty-storage refresh follows NIP-05 discovery into a real-shaped repository announcement"
     );
+
+    const stateHead = {
+      ...bootstrapAnnouncement, id: "e".repeat(64), kind: 30618,
+      tags: [["d", "dummy"], ["refs/heads/main", "1".repeat(40)]]
+    };
+    const olderAnnouncement = {
+      ...bootstrapAnnouncement, id: "a".repeat(64),
+      created_at: bootstrapAnnouncement.created_at - 1
+    };
+    const olderState = {
+      ...stateHead, id: "b".repeat(64), created_at: stateHead.created_at - 1
+    };
+    const issue = {
+      ...bootstrapAnnouncement, id: "c".repeat(64), kind: 1621,
+      tags: [["a", `30617:${owner}:dummy`], ["p", owner], ["subject", "Issue"]]
+    };
+    const matchesFilter = (event, filter) => (
+      (!filter.kinds || filter.kinds.includes(event.kind))
+      && (!filter.authors || filter.authors.includes(event.pubkey))
+      && (!filter.ids || filter.ids.includes(event.id))
+      && Object.entries(filter).every(([key, values]) => (
+        !key.startsWith("#") || event.tags.some(tag => (
+          tag[0] === key.slice(1) && values.includes(tag[1])
+        ))
+      ))
+    );
+    for (const target of [bootstrapAnnouncement, stateHead]) {
+      for (const deletionRelay of ["wss://domain.example", "wss://repository.example"]) {
+        storage.clear();
+        const deletion = {
+          ...bootstrapAnnouncement, id: "f".repeat(64), kind: 5,
+          created_at: target.created_at + 1, tags: [["e", target.id]]
+        };
+        const queries = [];
+        let serveDeletion = true;
+        clientNostrService.fetchEvents = async (filters, _timeout, relays) => {
+          queries.push({ filters, relays });
+          const available = [bootstrapAnnouncement, olderAnnouncement];
+          if (relays.includes("wss://repository.example")) {
+            available.push(stateHead, olderState, issue);
+          }
+          if (serveDeletion && relays.includes(deletionRelay)) available.push(deletion);
+          return available.filter(event => filters.some(filter => matchesFilter(event, filter)));
+        };
+        const deletionApp = new App();
+        deletionApp.repositories = bootstrapApp.repositories;
+        deletionApp.scheduleExternalIdentityRefresh = () => {};
+        await deletionApp.refreshAllNostr(false);
+        const deletedField = target.kind === 30617 ? "announcement" : "state";
+        ok(
+          deletionApp.nostrError === null
+            && deletionApp.nostrData.dummy[deletedField] === null
+            && deletionApp.nostrEventCache.has(deletion.id),
+          `exact-ID ${deletedField} deletion on ${deletionRelay} removes the head without reviving its predecessor`
+        );
+        assert(queries.some(query => (
+          query.relays.includes(deletionRelay)
+          && query.filters.some(filter => filter["#e"]?.includes(target.id))
+        )), "metadata ID deletions must be queried on both relay sets");
+        assert(queries.some(query => (
+          query.relays.includes("wss://repository.example")
+          && query.filters.some(filter => filter["#e"]?.includes(issue.id))
+        )), "ordinary content deletions must still be queried on repository relays");
+        assert(!queries.some(query => (
+          query.relays.includes("wss://domain.example")
+          && query.filters.some(filter => filter["#e"]?.includes(issue.id))
+        )), "ordinary content IDs must not be sent to discovery-only relays");
+        serveDeletion = false;
+        await deletionApp.refreshAllNostr(false);
+        assert.equal(deletionApp.nostrData.dummy[deletedField], null,
+          "an empty later deletion response must not resurrect the withdrawn metadata");
+      }
+    }
   } finally {
     verificationService.getDomainAuthority = originalAuthorityLookup;
     clientNostrService.fetchEvents = originalNostrFetch;

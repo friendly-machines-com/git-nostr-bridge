@@ -4461,12 +4461,12 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ].map(event => event.id).concat(referencedPatchIds), uniqueAddresses, collaborationRelays);
 
           // Announcement/state tombstones may live on either the domain
-          // discovery relays or the repository relays. Keep this metadata
-          // lookup separate so ordinary collaboration references are not
-          // unnecessarily sent to discovery-only relays.
+          // discovery relays or the repository relays. Query both IDs and
+          // coordinates: an exact-ID withdrawal need not carry an `a` tag.
+          // Keep ordinary collaboration references off discovery-only relays.
           try {
             await this.fetchDeletionRequests(
-              [],
+              metadataEvents.map(event => event.id),
               metadataCoordinates,
               normalizeRelayUrls([
                 ...discoveryRelays,
@@ -4485,7 +4485,6 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
               [
                 ...referencedPatchIds,
                 ...[
-                  ...metadataEvents,
                   ...collaborationEvents,
                   ...starReactionCandidates,
                   ...statuses,
