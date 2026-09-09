@@ -1966,6 +1966,140 @@ sandbox.document.getElementById = originalGetElementById;
   }
 }
 
+// Revision URLs must reproduce the selected content without an existing page cache.
+{
+  const originalLookup = sandbox.document.getElementById;
+  const originalGit = sandbox.git;
+  const originalTree = sandbox.__clientTest.gitService.getTree;
+  const originalBlob = sandbox.__clientTest.gitService.getBlob;
+  const originalHash = windowObject.location.hash;
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, { value: "", innerHTML: "", textContent: "", disabled: false, style: {},
+        classList: { add: name => classes.add(name), remove: name => classes.delete(name),
+          contains: name => classes.has(name), toggle() {} } });
+    }
+    return elements.get(id);
+  };
+  const repo = { id: "team/repo", name: "repo", path: "team/repo.git" };
+  const branch = "refs/remotes/origin/main";
+  const oidA = "a".repeat(40), oidB = "b".repeat(40), oidC = "c".repeat(40);
+  const commits = new Map([oidA, oidB, oidC].map(oid => [oid, {
+    oid, commit: { message: oid, tree: `root-${oid}`, author: { name: "Author" } }
+  }]));
+  let branchTip = oidA;
+  let historyUnavailable = false;
+  const path = "src/file name.txt";
+  const base = "#/repo/team%2Frepo";
+  const branchUrl = `${base}/blob/${encodeURIComponent(branch)}/src/file%20name.txt`;
+  const pinnedUrl = `${base}/blob/${oidB}/src/file%20name.txt`;
+  const makeApp = () => {
+    const app = new App();
+    app.repositories = [repo];
+    app.showTabElement = () => {};
+    app.ensureRepoLoaded = async target => {
+      app.currentRepo = target;
+      app.currentDir = "/repo";
+      app.currentBranches = ["main"];
+      if (app.currentRef === "HEAD") app.currentRef = branch;
+      return true;
+    };
+    return app;
+  };
+  try {
+    sandbox.document.getElementById = element;
+    sandbox.git = {
+      readCommit: async ({ oid }) => {
+        if (!commits.has(oid)) throw new Error("missing object");
+        return commits.get(oid);
+      },
+      log: async ({ ref }) => {
+        if (ref === branch) return [commits.get(branchTip), commits.get(oidB)];
+        if (historyUnavailable) throw new Error("shallow parent unavailable");
+        return commits.has(ref) ? [commits.get(ref)] : [];
+      }
+    };
+    sandbox.__clientTest.gitService.getTree = async (_dir, tree) => {
+      const oid = tree.slice(tree.indexOf("-") + 1);
+      return tree.startsWith("root-")
+        ? [{ path: "src", type: "tree", oid: `folder-${oid}` }]
+        : [{ path: "file name.txt", type: "blob", oid: `blob-${oid}` }];
+    };
+    sandbox.__clientTest.gitService.getBlob = async (_dir, oid) => `Contents ${oid}`;
+    const app = makeApp();
+    windowObject.location.hash = branchUrl;
+    await app.route();
+    assert.equal(app.currentCommitOid, oidA);
+    await app.onCommitChange(oidB);
+    assert.equal(windowObject.location.hash, pinnedUrl);
+    await app.route(); // Browsers dispatch hashchange; this harness does so explicitly.
+    ok(app.currentCommitOid === oidB
+      && element("viewer-code").textContent === `Contents blob-${oidB}`
+      && !element("file-viewer").classList.contains("hidden")
+      && element("branch-select").value === oidB,
+      "selecting a historical commit updates the URL and preserves the open file");
+    ok(element("current-path-breadcrumb").innerHTML.includes(`/tree/${oidB}/src`)
+      && element("file-table-body").innerHTML.includes(pinnedUrl)
+      && element("file-table-body").innerHTML.includes(`/tree/${oidB}`),
+      "file links, breadcrumbs, and parent links retain the full selected commit ID");
+
+    branchTip = oidC;
+    const reloaded = makeApp();
+    await reloaded.route();
+    ok(reloaded.currentCommitOid === oidB
+      && element("viewer-code").textContent === `Contents blob-${oidB}`,
+      "a copied commit URL opens the same file in a fresh app even after the branch advances");
+    windowObject.location.hash = branchUrl;
+    await app.route();
+    assert.equal(app.currentCommitOid, oidC);
+    windowObject.location.hash = pinnedUrl;
+    await app.route();
+    ok(app.currentCommitOid === oidB && element("viewer-code").textContent === `Contents blob-${oidB}`,
+      "Back/Forward-style route changes distinguish the branch tip from the pinned revision");
+
+    windowObject.location.hash = `${base}/tree/${encodeURIComponent(branch)}/src`;
+    await app.route();
+    await app.onCommitChange(oidB);
+    assert.equal(windowObject.location.hash, `${base}/tree/${oidB}/src`);
+    await app.route();
+    ok(app.currentCommitOid === oidB && app.currentFolderPath === "src"
+      && element("file-table-body").innerHTML.includes(pinnedUrl),
+      "directory commit selection pins the revision without dropping the current directory");
+
+    historyUnavailable = true;
+    const shallow = makeApp();
+    windowObject.location.hash = pinnedUrl;
+    await shallow.route();
+    ok(shallow.currentCommitOid === oidB && !element("file-viewer").classList.contains("hidden"),
+      "an exact commit remains viewable when its shallow ancestor history cannot be listed");
+    const missing = makeApp();
+    const missingOid = "d".repeat(40);
+    windowObject.location.hash = `${base}/blob/${missingOid}/src/file%20name.txt`;
+    await missing.route();
+    ok(missing.currentCommitOid === null && element("file-viewer").classList.contains("hidden")
+      && element("file-table-body").innerHTML.includes(missingOid)
+      && element("file-table-body").innerHTML.includes("No other revision has been substituted"),
+      "an unavailable commit reports the requested ID instead of substituting branch content");
+    windowObject.location.hash = `${base}/blob/${oidB}/src/missing.txt`;
+    await shallow.route();
+    ok(shallow.currentCommitOid === oidB && element("file-viewer").classList.contains("hidden")
+      && element("loading-git-indicator").textContent.includes("File not found"),
+      "a missing file stays on the selected revision and never falls back to another commit");
+    windowObject.location.hash = `${base}/tree/abcdef0`;
+    await makeApp().route();
+    ok(element("file-table-body").innerHTML.includes("Ambiguous or unsupported ref route"),
+      "abbreviated commit IDs remain rejected as ambiguous routes");
+  } finally {
+    sandbox.document.getElementById = originalLookup;
+    sandbox.git = originalGit;
+    sandbox.__clientTest.gitService.getTree = originalTree;
+    sandbox.__clientTest.gitService.getBlob = originalBlob;
+    windowObject.location.hash = originalHash;
+  }
+}
+
 // State publication must not combine one repository's authority with another's refs.
 {
   const originalLogin = clientNostrService.login;

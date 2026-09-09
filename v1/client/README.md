@@ -658,6 +658,16 @@ must not hide its commit from a maintainer-published branch.**
   refs and tags, distinguish branches from same-named tags with fully qualified
   refs, reject ambiguous short-ref routes, and represent an actually empty
   repository without inventing branches.
+- Selecting a commit replaces the revision segment in the URL with its full
+  commit ID, preserving the current file or directory path. For example,
+  `#/repo/example/blob/<full-commit-id>/src/main.js` identifies that exact
+  revision. Links and breadcrumbs retain it so sharing, reloads, and browser
+  history cannot silently replace historical content with a moving branch tip.
+  Fully qualified branch/tag URLs remain supported for following those refs;
+  abbreviated commit IDs are rejected as ambiguous. The client fetches shallow
+  history: if an exact commit is unavailable, it reports that ID rather than
+  substituting another revision. Missing ancestors do not prevent displaying
+  an available commit and its files.
 - Concurrent loads of one repository share a single fetch. Navigation
   generations prevent a slower obsolete route from overwriting the latest
   repository, ref, tree, or blob view.

@@ -2842,6 +2842,8 @@ async loadRepoOnce(repoPath) {
         this.currentTags = [];
         this.nostrData = {};
         this.pathStack = [];
+        this.currentFilePath = null;
+        this.currentFolderPath = "";
         this.nostrLoading = false;
         this.nostrRefreshPending = false;
         this.nostrLoaded = false;
@@ -3553,7 +3555,11 @@ async loadRepoOnce(repoPath) {
           }
 
           if (requestedTab) {
-            this.renderTabView(requestedTab);
+            if (requestedTab === "code") {
+              window.location.hash = `#/repo/${hashSegment(repo.id)}/tree/${hashSegment(this.currentRef || "HEAD")}`;
+            } else {
+              this.renderTabView(requestedTab);
+            }
             return;
           }
 
@@ -3588,6 +3594,10 @@ async loadRepoOnce(repoPath) {
             return;
           }
 
+          if (GIT_COMMIT_ID.test(this.currentRef || "")) {
+            window.location.hash = `#/repo/${hashSegment(repo.id)}/tree/${this.currentRef}`;
+            return;
+          }
           try {
             await this.renderCodeView(
               this.currentRef || "HEAD",
@@ -3633,6 +3643,8 @@ async loadRepoOnce(repoPath) {
         this.currentTags = [];
         this.currentCommitOid = null;
         this.pathStack = [];
+        this.currentFilePath = null;
+        this.currentFolderPath = "";
         for (const id of ["branch-select", "commit-select"]) {
           const select = document.getElementById(id);
           select.innerHTML = '';
@@ -3748,12 +3760,16 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ref === `refs/remotes/origin/${branch}`
         ));
         const knownTagRef = this.currentTags.some(tag => ref === `refs/tags/${tag}`);
+        const commitRef = GIT_COMMIT_ID.test(ref);
+        if (commitRef) ref = ref.toLowerCase();
         const emptyHead = ref === "HEAD"
           && this.currentBranches.length === 0
           && this.currentTags.length === 0;
-        if (!knownBranchRef && !knownTagRef && !emptyHead) {
+        if (!knownBranchRef && !knownTagRef && !commitRef && !emptyHead) {
           throw new Error("Ambiguous or unsupported ref route.");
         }
+        this.currentFilePath = filePath;
+        this.currentFolderPath = folderPath || "";
         this.currentIssueId = null;
         this.currentThreadType = null;
         this.currentCommentScopeId = null;
@@ -3767,7 +3783,8 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           gitIndicator.textContent = warning || "";
         }
 
-        if (this.commits.length === 0 || this.currentRef !== ref) {
+        const cachedCommit = commitRef && this.commits.find(commit => commit.oid === ref);
+        if (!cachedCommit && (this.commits.length === 0 || this.currentRef !== ref)) {
           // Invalidate the old history before yielding: overlapping navigation
           // must not mistake the previous ref's commits for the requested ref.
           this.commits = [];
@@ -3786,13 +3803,21 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           if (sel) sel.value = ref;
 
           let loadedCommits = [];
-          for (const tryRef of [ref]) {
-            if (!tryRef) continue;
+          if (commitRef) {
             try {
-              loadedCommits = await git.log({ fs: gitService.fs, dir: this.currentDir, ref: tryRef, depth: 25 });
-              if (loadedCommits && loadedCommits.length > 0) break;
-            } catch (e) {}
+              const result = await git.readCommit({ fs: gitService.fs, dir: this.currentDir, oid: ref });
+              loadedCommits = [{ ...result, oid: ref }];
+            } catch (_) {
+              throw new Error(`Commit ${ref} is not available in the fetched repository history. No other revision has been substituted.`);
+            }
           }
+          if (!isCurrentNavigation()) return;
+          try {
+            const history = await git.log({ fs: gitService.fs, dir: this.currentDir, ref, depth: 25 });
+            // A shallow history may end before git.log can complete. The exact
+            // requested commit is still viewable; never fall back to a ref tip.
+            if (history?.length && (!commitRef || history[0].oid === ref)) loadedCommits = history;
+          } catch (_) {}
           if (!isCurrentNavigation()) return;
 
           // Only the current navigation may install a ref and its history.
@@ -3819,6 +3844,20 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
         }
 
+        if (commitRef) {
+          this.currentRef = ref;
+          this.currentCommitOid = ref;
+          document.getElementById("commit-select").value = ref;
+          this.updateCommitBanner(cachedCommit || this.commits[0]);
+        }
+        const branchSelect = document.getElementById("branch-select");
+        branchSelect.innerHTML = [
+          ...(commitRef ? [`<option value="${ref}">Commit: ${ref}</option>`] : []),
+          ...this.currentBranches.map(branch => `<option value="${escapeHtml(`refs/remotes/origin/${branch}`)}">Branch: ${escapeHtml(branch)}</option>`),
+          ...this.currentTags.map(tag => `<option value="${escapeHtml(`refs/tags/${tag}`)}">Tag: ${escapeHtml(tag)}</option>`)
+        ].join("") || '<option value="HEAD">Empty repository</option>';
+        branchSelect.value = ref;
+        branchSelect.disabled = !commitRef && !this.currentBranches.length && !this.currentTags.length;
         if (!this.currentCommitOid && this.commits.length > 0) {
           this.currentCommitOid = this.commits[0].oid;
         }
@@ -3861,6 +3900,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
           const currentFolder = this.pathStack[this.pathStack.length - 1];
           const tree = await gitService.getTree(this.currentDir, currentFolder.oid);
+          if (!isCurrentNavigation()) return;
           const blobEntry = tree.find(e => e.path === fileName && e.type === 'blob');
           if (blobEntry) {
             const content = await gitService.getBlob(this.currentDir, blobEntry.oid);
@@ -4021,27 +4061,13 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       async onCommitChange(oid) {
         const commitObj = this.commits.find(c => c.oid === oid);
         // Ignore stale selector events while another ref's history is loading.
-        if (!commitObj) return;
-        const navigationGeneration = ++this.navigationGeneration;
-        try {
-          this.currentCommitOid = oid;
-          this.updateCommitBanner(commitObj);
-
-          const currentPath = this.pathStack.slice(1).map(p => p.name).join('/');
-          await this.renderCodeView(
-            this.currentRef,
-            currentPath,
-            null,
-            navigationGeneration
-          );
-        } catch (error) {
-          if (navigationGeneration !== this.navigationGeneration) return;
-          const indicator = document.getElementById("loading-git-indicator");
-          if (indicator) {
-            indicator.style.color = "var(--red)";
-            indicator.textContent = `Could not load commit: ${error.message}`;
-          }
-        }
+        if (!commitObj || !GIT_COMMIT_ID.test(oid) || !this.currentRepo) return;
+        // The URL, not an in-memory selector, owns the revision. This also
+        // preserves the file path and gives reload, sharing, and Back/Forward
+        // the same meaning as the content currently being inspected.
+        const mode = this.currentFilePath ? "blob" : "tree";
+        const path = this.currentFilePath || this.currentFolderPath || "";
+        window.location.hash = `#/repo/${hashSegment(this.currentRepo.id)}/${mode}/${oid.toLowerCase()}${path ? "/" + hashFilePath(path) : ""}`;
       }
 
       updateCommitBanner(commitObj) {
