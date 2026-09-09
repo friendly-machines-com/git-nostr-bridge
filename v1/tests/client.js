@@ -1346,6 +1346,95 @@ ok(
 );
 
 (async () => {
+  // A response header is not completion: body reads share the original deadline.
+  {
+    const originalFetch = sandbox.fetch;
+    const originalSetTimeout = windowObject.setTimeout;
+    const originalClearTimeout = windowObject.clearTimeout;
+    const originalNip19 = windowObject.NostrTools.nip19;
+    const domain = "body-timeout.example";
+    const previousDomain = verificationService.domainCache.get(domain);
+    const timers = new Map();
+    let nextTimer = 0;
+    try {
+      windowObject.setTimeout = (callback, delay) => {
+        timers.set(++nextTimer, { callback, delay });
+        return nextTimer;
+      };
+      windowObject.clearTimeout = id => timers.delete(id);
+      windowObject.NostrTools.nip19 = { npubEncode: () => "npub1test" };
+      for (const kind of ["projects", "domain", "gist"]) {
+        for (const outcome of ["timeout", "success"]) {
+          verificationService.domainCache.delete(domain);
+          let signal, finishBody, startBody;
+          const bodyStarted = new Promise(resolve => { startBody = resolve; });
+          sandbox.fetch = async (_url, options) => {
+            signal = options.signal;
+            const readBody = () => {
+              startBody();
+              return new Promise((resolve, reject) => {
+                finishBody = resolve;
+                signal.addEventListener("abort", () => reject(new Error("Response body timed out")), { once: true });
+              });
+            };
+            return { ok: true, status: 200, text: readBody, json: readBody };
+          };
+          const app = new App();
+          let routed = false;
+          app.renderOverview = () => {};
+          app.refreshAllNostr = async () => {};
+          app.route = async () => { routed = true; };
+          app.startNostrPolling = () => {};
+          const pending = kind === "projects" ? app.init()
+            : kind === "domain" ? verificationService.getDomainDocument(domain, true)
+            : externalIdentityService.verifyGithubClaim(owner, { login: "example", proof: "abcde" });
+          await bodyStarted;
+          assert.equal(timers.size, 1, "headers must not clear the request deadline");
+          const timer = Array.from(timers.values())[0];
+          assert.equal(timer.delay, kind === "projects" ? 8000 : kind === "domain" ? 5000 : 3000);
+          if (outcome === "timeout") timer.callback();
+          else finishBody(kind === "projects" ? "example.git\n"
+            : kind === "domain" ? { names: { _: owner }, relays: {} } : {});
+          const result = await pending;
+          const expected = kind === "projects"
+            ? routed && (outcome === "timeout"
+                ? app.projectError.includes("timed out") && app.repositories.length === 0
+                : app.repositories[0]?.id === "example")
+            : kind === "domain"
+              ? (outcome === "timeout" ? Object.keys(result.names).length === 0 : result.names._ === owner)
+              : result.status === (outcome === "timeout" ? "unavailable" : "invalid");
+          ok(expected && timers.size === 0 && signal.aborted === (outcome === "timeout"),
+            `${kind} ${outcome} covers body consumption and releases its HTTP deadline`);
+        }
+      }
+      verificationService.domainCache.delete(domain);
+      let headerSignal;
+      sandbox.fetch = (_url, options) => {
+        headerSignal = options.signal;
+        return new Promise((_resolve, reject) => headerSignal.addEventListener("abort", () => reject(new Error("Header timeout")), { once: true }));
+      };
+      const waitingHeaders = verificationService.getDomainDocument(domain, true);
+      Array.from(timers.values())[0].callback();
+      await waitingHeaders;
+      ok(headerSignal.aborted && timers.size === 0, "HTTP deadlines still abort requests stalled before headers");
+      sandbox.fetch = async () => ({ ok: true, json: async () => { throw new Error("Invalid JSON"); } });
+      await verificationService.getDomainDocument(domain, true);
+      assert.equal(timers.size, 0, "body parsing errors must release the deadline");
+      sandbox.fetch = async () => ({ ok: false, status: 404,
+        json: async () => { throw new Error("an HTTP error must not read this body"); } });
+      const notFound = await externalIdentityService.verifyGithubClaim(owner, { login: "example", proof: "abcde" });
+      ok(notFound.status === "invalid" && timers.size === 0,
+        "JSON errors and early HTTP-status returns release their deadlines");
+    } finally {
+      sandbox.fetch = originalFetch;
+      windowObject.setTimeout = originalSetTimeout;
+      windowObject.clearTimeout = originalClearTimeout;
+      windowObject.NostrTools.nip19 = originalNip19;
+      if (previousDomain === undefined) verificationService.domainCache.delete(domain);
+      else verificationService.domainCache.set(domain, previousDomain);
+    }
+  }
+
   const gitService = sandbox.__clientTest.gitService;
   const originalGitMethods = Object.fromEntries(
     ["loadRepo", "getBranches", "getTags", "getDefaultBranch"].map(key => [key, gitService[key]])

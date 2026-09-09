@@ -1393,11 +1393,14 @@
       ).href;
     }
 
-    async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
+    async function fetchWithTimeout(resource, options, timeoutMs, consumeResponse) {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
-        return await fetch(resource, { ...options, signal: controller.signal });
+        const response = await fetch(resource, { ...options, signal: controller.signal });
+        // fetch resolves at headers. Keep the same deadline alive through body
+        // consumption so a stalled text/JSON stream cannot hang its caller.
+        return await consumeResponse(response);
       } finally {
         window.clearTimeout(timer);
       }
@@ -2335,13 +2338,15 @@
       async getDomainDocument(domain = window.location.hostname, forceRefresh = false) {
         if (!forceRefresh && this.domainCache.has(domain)) return this.domainCache.get(domain);
         try {
-          const res = await fetchWithTimeout(
+          const data = await fetchWithTimeout(
             `https://${domain}/.well-known/nostr.json?name=_`,
             { cache: "no-store", redirect: "error" },
-            5000
+            5000,
+            async response => {
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              return await response.json();
+            }
           );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
           const names = data
             && typeof data.names === "object"
             && !Array.isArray(data.names)
@@ -2487,9 +2492,8 @@
           return { status: "unavailable" };
         }
 
-        let response;
         try {
-          response = await fetchWithTimeout(
+          return await fetchWithTimeout(
             `https://api.github.com/gists/${encodeURIComponent(claim.proof)}`,
             {
               cache: "no-store",
@@ -2498,18 +2502,16 @@
                 "X-GitHub-Api-Version": "2026-03-10"
               }
             },
-            3000
+            3000,
+            async response => {
+              if (response.status === 404) return { status: "invalid" };
+              if (!response.ok) return { status: "unavailable" };
+              const gist = await response.json();
+              return gistVerifiesNip39(gist, claim.login, npub)
+                ? { status: "valid", identity: claim }
+                : { status: "invalid" };
+            }
           );
-        } catch (_) {
-          return { status: "unavailable" };
-        }
-        if (response.status === 404) return { status: "invalid" };
-        if (!response.ok) return { status: "unavailable" };
-        try {
-          const gist = await response.json();
-          return gistVerifiesNip39(gist, claim.login, npub)
-            ? { status: "valid", identity: claim }
-            : { status: "invalid" };
         } catch (_) {
           return { status: "unavailable" };
         }
@@ -3464,13 +3466,15 @@ async loadRepoOnce(repoPath) {
 
       async init() {
         try {
-          const res = await fetchWithTimeout(
+          const text = await fetchWithTimeout(
             "projects.list",
             { cache: "no-store" },
-            8000
+            8000,
+            async response => {
+              if (!response.ok) throw new Error(`projects.list returned HTTP ${response.status}`);
+              return await response.text();
+            }
           );
-          if (!res.ok) throw new Error(`projects.list returned HTTP ${res.status}`);
-          const text = await res.text();
           this.repositories = text
             .trim()
             .split('\n')
