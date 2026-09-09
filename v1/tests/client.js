@@ -1638,6 +1638,72 @@ ok(
 );
 sandbox.document.getElementById = originalGetElementById;
 
+// State publication must not combine one repository's authority with another's refs.
+{
+  const originalLogin = clientNostrService.login;
+  const originalPublish = clientNostrService.signAndPublish;
+  const originalPubkey = clientNostrService.pubkey;
+  const originalAlert = sandbox.alert;
+  const repoA = { id: "state-a", name: "Repository A" };
+  const repoB = { id: "state-b", name: "Repository B" };
+  const announcement = { pubkey: owner, tags: [["d", repoA.id]] };
+  const messages = [];
+  let resolved = 0;
+  let published = 0;
+  const stateApp = new App();
+  stateApp.currentRepo = repoA;
+  stateApp.nostrData[repoA.id] = { announcement };
+  stateApp.repositoryStateTags = async () => {
+    resolved++;
+    return [["d", stateApp.currentRepo.id], ["refs/heads/main", "1".repeat(40)]];
+  };
+  stateApp.publicationRelayUrls = async target => {
+    assert.equal(target, announcement);
+    return ["wss://state-a.example"];
+  };
+  stateApp.cacheEvents = () => {};
+  stateApp.refreshAllNostr = async () => {};
+  try {
+    sandbox.alert = message => messages.push(message);
+    clientNostrService.pubkey = owner;
+    clientNostrService.signAndPublish = async (event, relays) => {
+      published++;
+      assert.equal(event.tags[0][1], repoA.id);
+      assert.equal(relays[0], "wss://state-a.example");
+      // Navigation after refs were captured must not change the success label.
+      stateApp.currentRepo = repoB;
+      return event;
+    };
+    for (const destination of [repoB, null]) {
+      stateApp.currentRepo = repoA;
+      let finishLogin;
+      clientNostrService.login = () => new Promise(resolve => { finishLogin = resolve; });
+      const pending = stateApp.broadcastRepoState();
+      stateApp.currentRepo = destination;
+      finishLogin(true);
+      await pending;
+      ok(
+        resolved === 0 && published === 0
+          && messages.at(-1).includes("selected repository changed"),
+        `state publication aborts before resolving refs when login outlasts navigation to ${destination ? "another repository" : "the overview"}`
+      );
+    }
+    stateApp.currentRepo = repoA;
+    clientNostrService.login = async () => true;
+    await stateApp.broadcastRepoState();
+    ok(
+      resolved === 1 && published === 1
+        && messages.at(-1) === "Published branches and tags for “Repository A”.",
+      "state publication retains its original target and success label after refs are captured"
+    );
+  } finally {
+    clientNostrService.login = originalLogin;
+    clientNostrService.signAndPublish = originalPublish;
+    clientNostrService.pubkey = originalPubkey;
+    sandbox.alert = originalAlert;
+  }
+}
+
 const signedPublication = async requested => {
     const serialized = JSON.stringify([
       0,

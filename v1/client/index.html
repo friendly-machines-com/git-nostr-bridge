@@ -6327,12 +6327,19 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
 
       async broadcastRepoState() {
         try {
-          const data = this.nostrData[this.currentRepo.id];
+          const repo = this.currentRepo;
+          if (!repo) throw new Error("No repository is selected.");
+          const data = this.nostrData[repo.id];
           if (!data?.announcement) {
             throw new Error("Set up collaboration before publishing branches and tags.");
           }
           if (!await nostrService.login(false)) {
             throw new Error("Sign in to publish branches and tags.");
+          }
+          // Login can outlast navigation. Do not resolve another repository's
+          // refs using the original repository's authority and relay settings.
+          if (this.currentRepo?.id !== repo.id) {
+            throw new Error("The selected repository changed. Publish again from the intended repository.");
           }
           if (!verificationService.maintainerPubkeys(data.announcement).has(nostrService.pubkey.toLowerCase())) {
             throw new Error("The signed-in account is not a repository maintainer.");
@@ -6348,7 +6355,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           ));
           this.cacheEvents([signedState]);
           alert(
-            `Published branches and tags for “${this.currentRepo.name}”.`
+            `Published branches and tags for “${repo.name}”.`
           );
           await this.refreshAllNostr();
         } catch (e) {
