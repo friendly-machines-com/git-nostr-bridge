@@ -1966,6 +1966,112 @@ sandbox.document.getElementById = originalGetElementById;
   }
 }
 
+// Root README previews share the inline viewer without turning tree routes into blob routes.
+{
+  const originalLookup = sandbox.document.getElementById;
+  const originalGit = sandbox.git;
+  const gitService = sandbox.__clientTest.gitService;
+  const originalTree = gitService.getTree;
+  const originalBlob = gitService.getBlob;
+  const originalHash = windowObject.location.hash;
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, { value: "", innerHTML: "", textContent: "", disabled: false, style: {},
+        classList: { add: name => classes.add(name), remove: name => classes.delete(name),
+          contains: name => classes.has(name) } });
+    }
+    return elements.get(id);
+  };
+  const branch = "refs/remotes/origin/main";
+  const oidA = "a".repeat(40), oidB = "b".repeat(40);
+  let entries = [];
+  const reads = [];
+  const content = "# README\n<script>plain text, not executable</script>";
+  try {
+    sandbox.document.getElementById = element;
+    sandbox.git = {
+      readCommit: async ({ oid }) => ({ oid, commit: { tree: `tree-${oid}` } })
+    };
+    gitService.getTree = async (_dir, treeOid) => entries.map(entry => ({
+      ...entry, oid: entry.type === "tree" ? "subtree" : `${treeOid}:${entry.path}`
+    }));
+    gitService.getBlob = async (_dir, oid) => { reads.push(oid); return content; };
+    const app = new App();
+    Object.assign(app, { currentRepo: { id: "readme" }, currentDir: "/readme", currentRef: branch,
+      currentBranches: ["main"], currentCommitOid: oidA,
+      commits: [{ oid: oidA, commit: {} }, { oid: oidB, commit: {} }] });
+    app.showTabElement = () => {};
+    app.updateCommitBanner = () => {};
+    const render = (folder = "", file = null, ref = app.currentRef) => (
+      app.renderCodeView(ref, folder, file, ++app.navigationGeneration)
+    );
+    windowObject.location.hash = "#/repo/readme";
+    for (const [names, expected] of [
+      [["README", "README.org", "README.md"], "README.md"],
+      [["README", "README.org"], "README.org"],
+      [["README"], "README"],
+      [["readme.md", "LICENSE"], null]
+    ]) {
+      entries = names.map(path => ({ path, type: "blob" }));
+      reads.length = 0;
+      await render();
+      ok(expected
+        ? reads.length === 1 && reads[0].endsWith(`:${expected}`)
+          && !element("file-viewer").classList.contains("hidden")
+          && element("viewer-filename").textContent.startsWith(`${expected} (@ `)
+          && element("viewer-code").textContent === content
+        : reads.length === 0 && element("file-viewer").classList.contains("hidden"),
+        `root README preview uses ${expected || "no preview when no exact candidate exists"}`);
+      assert.equal(windowObject.location.hash, "#/repo/readme");
+      assert.equal(app.currentFilePath, null);
+      assert(element("file-table-body").innerHTML.includes(names[0]));
+    }
+    entries = [{ path: "README.md", type: "tree" }, { path: "README.org", type: "blob" }];
+    await render();
+    ok(element("viewer-filename").textContent.startsWith("README.org"),
+      "README preview skips directories and selects the next matching file");
+
+    entries = [{ path: "README.md", type: "blob" }, { path: "LICENSE", type: "blob" }, { path: "src", type: "tree" }];
+    await render("", null, oidB);
+    let downloaded;
+    app.downloadBlob = (oid, name) => { downloaded = { oid, name }; };
+    element("viewer-download-btn").onclick();
+    ok(reads.at(-1) === `tree-${oidB}:README.md`
+      && downloaded.oid === `tree-${oidB}:README.md` && downloaded.name === "README.md",
+      "README preview and download use the selected historical commit's tree");
+    await app.onCommitChange(oidA);
+    assert.equal(windowObject.location.hash, `#/repo/readme/tree/${oidA}`,
+      "commit selection from a README preview must remain a root directory route");
+    await render(null, "LICENSE");
+    assert(element("viewer-filename").textContent.startsWith("LICENSE"));
+    const beforeSubdirectory = reads.length;
+    await render("src");
+    ok(reads.length === beforeSubdirectory && element("file-viewer").classList.contains("hidden"),
+      "explicit files replace README previews and subdirectories do not auto-preview a README");
+
+    let release, started;
+    const waiting = new Promise(resolve => { started = resolve; });
+    gitService.getBlob = () => { started(); return new Promise(resolve => { release = resolve; }); };
+    const obsolete = render();
+    await waiting;
+    entries = [];
+    await render();
+    release("Obsolete README");
+    await obsolete;
+    ok(element("file-viewer").classList.contains("hidden")
+      && element("viewer-code").textContent !== "Obsolete README",
+      "a late README read cannot overwrite a newer navigation");
+  } finally {
+    sandbox.document.getElementById = originalLookup;
+    sandbox.git = originalGit;
+    gitService.getTree = originalTree;
+    gitService.getBlob = originalBlob;
+    windowObject.location.hash = originalHash;
+  }
+}
+
 // Revision URLs must reproduce the selected content without an existing page cache.
 {
   const originalLookup = sandbox.document.getElementById;

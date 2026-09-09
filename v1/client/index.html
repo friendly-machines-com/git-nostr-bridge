@@ -3893,23 +3893,26 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
           }
         }
 
-        await this.renderCurrentTree(navigationGeneration);
+        const tree = await this.renderCurrentTree(navigationGeneration);
         if (!isCurrentNavigation()) return;
 
-        if (filePath) {
-          const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
-          const currentFolder = this.pathStack[this.pathStack.length - 1];
-          const tree = await gitService.getTree(this.currentDir, currentFolder.oid);
-          if (!isCurrentNavigation()) return;
-          const blobEntry = tree.find(e => e.path === fileName && e.type === 'blob');
+        if (filePath || !folderPath) {
+          // Preview only the root README, from the same tree just displayed.
+          // Keep the directory URL/context so revision changes stay root views.
+          const fileName = filePath
+            ? filePath.substring(filePath.lastIndexOf('/') + 1)
+            : ["README.md", "README.org", "README"].find(name => (
+                (tree || []).some(entry => entry.path === name && entry.type === "blob")
+              ));
+          const blobEntry = (tree || []).find(e => e.path === fileName && e.type === 'blob');
           if (blobEntry) {
             const content = await gitService.getBlob(this.currentDir, blobEntry.oid);
             if (!isCurrentNavigation()) return;
-            document.getElementById("viewer-filename").textContent = `${filePath} (@ ${this.currentCommitOid.substring(0, 7)})`;
+            document.getElementById("viewer-filename").textContent = `${filePath || fileName} (@ ${this.currentCommitOid.substring(0, 7)})`;
             document.getElementById("viewer-code").textContent = content;
             document.getElementById("viewer-download-btn").onclick = () => this.downloadBlob(blobEntry.oid, fileName);
             document.getElementById("file-viewer").classList.remove("hidden");
-          } else {
+          } else if (filePath) {
             if (gitIndicator) {
               gitIndicator.style.color = "var(--red)";
               gitIndicator.textContent = `File not found: ${filePath}`;
@@ -4009,7 +4012,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         if (!tree || tree.length === 0) {
           rowsHtml += `<tr><td colspan="4" style="color:var(--text-muted); padding:16px;">This folder is empty.</td></tr>`;
           tbody.innerHTML = rowsHtml;
-          return;
+          return tree || [];
         }
 
         tree.sort((a, b) => (b.type === 'tree') - (a.type === 'tree') || a.path.localeCompare(b.path));
@@ -4052,6 +4055,7 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
         }).join('');
 
         tbody.innerHTML = rowsHtml;
+        return tree;
       }
 
       onRefChange(ref) {
