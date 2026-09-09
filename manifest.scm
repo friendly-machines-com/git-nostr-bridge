@@ -9,4 +9,5 @@
    "unzip"
    "patch"
    "sqlite"
+   "node" ; for the client tests
    ))))
