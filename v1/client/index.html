@@ -4036,7 +4036,9 @@ async renderCodeView(ref, folderPath, filePath, navigationGeneration = this.navi
       async resetGitCache(repoId) {
         const repo = this.repositories.find(candidate => candidate.id === repoId);
         if (!repo || this.gitCacheResets.has(repoId)) return;
-        if (!window.confirm(`Clear the downloaded Git cache for “${repo.name}” and retry?\n\nOther repositories, Nostr events, settings, and remote Git data are not removed. This repository must be downloaded again and may be unavailable while offline.`)) return;
+        const otherTabsWarning = navigator.locks?.request ? ""
+          : "\n\nThis browser cannot coordinate resets across tabs. Close other tabs using this site before continuing.";
+        if (!window.confirm(`Clear the downloaded Git cache for “${repo.name}” and retry?\n\nOther repositories, Nostr events, settings, and remote Git data are not removed. This repository must be downloaded again and may be unavailable while offline.${otherTabsWarning}`)) return;
         this.gitCacheResets.add(repoId);
         const generation = this.currentRepo?.id === repoId ? ++this.navigationGeneration : null;
         if (generation !== null) {
